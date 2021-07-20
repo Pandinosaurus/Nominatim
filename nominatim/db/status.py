@@ -9,6 +9,7 @@ from nominatim.tools.exec_utils import get_url
 from nominatim.errors import UsageError
 
 LOG = logging.getLogger()
+ISODATE_FORMAT = '%Y-%m-%dT%H:%M:%S'
 
 def compute_database_date(conn):
     """ Determine the date of the database from the newest object in the
@@ -16,7 +17,10 @@ def compute_database_date(conn):
     """
     # First, find the node with the highest ID in the database
     with conn.cursor() as cur:
-        osmid = cur.scalar("SELECT max(osm_id) FROM place WHERE osm_type='N'")
+        if conn.table_exists('place'):
+            osmid = cur.scalar("SELECT max(osm_id) FROM place WHERE osm_type='N'")
+        else:
+            osmid = cur.scalar("SELECT max(osm_id) FROM placex WHERE osm_type='N'")
 
         if osmid is None:
             LOG.fatal("No data found in the database.")
@@ -34,9 +38,9 @@ def compute_database_date(conn):
                   "URL used: %s", node_url)
         raise UsageError("Bad API data.")
 
-    LOG.debug("Found timestamp %s", match[1])
+    LOG.debug("Found timestamp %s", match.group(1))
 
-    return dt.datetime.fromisoformat(match[1]).replace(tzinfo=dt.timezone.utc)
+    return dt.datetime.strptime(match.group(1), ISODATE_FORMAT).replace(tzinfo=dt.timezone.utc)
 
 
 def set_status(conn, date, seq=None, indexed=True):
