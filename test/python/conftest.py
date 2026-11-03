@@ -1,52 +1,51 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# This file is part of Nominatim. (https://nominatim.org)
+#
+# Copyright (C) 2026 by the Nominatim developer community.
+# For a full list of authors see the git log.
 import itertools
 import sys
+import asyncio
 from pathlib import Path
+from packaging.version import Version
+import pytest_asyncio
 
-import psycopg2
-import psycopg2.extras
+if sys.platform == 'win32':
+    if Version(pytest_asyncio.__version__) >= Version("1.4.0"):
+        # pytest-asyncio hook for event loop factory.
+        def pytest_asyncio_loop_factories(config, item):
+            return {"selector": asyncio.SelectorEventLoop}
+    else:
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+import psycopg
+from psycopg import sql as pysql
 import pytest
-import tempfile
-
-SRC_DIR = Path(__file__) / '..' / '..' / '..'
 
 # always test against the source
-sys.path.insert(0, str(SRC_DIR.resolve()))
+SRC_DIR = (Path(__file__) / '..' / '..' / '..').resolve()
+sys.path.insert(0, str(SRC_DIR / 'src'))
 
-from nominatim.config import Configuration
-from nominatim.db import connection
-from nominatim.db.sql_preprocessor import SQLPreprocessor
+from nominatim_db.config import Configuration
+from nominatim_db.db import connection, properties
+from nominatim_db.db.sql_preprocessor import SQLPreprocessor
+import nominatim_db.tokenizer.factory
 
-class _TestingCursor(psycopg2.extras.DictCursor):
-    """ Extension to the DictCursor class that provides execution
-        short-cuts that simplify writing assertions.
-    """
+import dummy_tokenizer
+from cursor import CursorForTesting
 
-    def scalar(self, sql, params=None):
-        """ Execute a query with a single return value and return this value.
-            Raises an assertion when not exactly one row is returned.
-        """
-        self.execute(sql, params)
-        assert self.rowcount == 1
-        return self.fetchone()[0]
 
-    def row_set(self, sql, params=None):
-        """ Execute a query and return the result as a set of tuples.
-        """
-        self.execute(sql, params)
+def _with_srid(geom, default=None):
+    if geom is None:
+        return None if default is None else f"SRID=4326;{default}"
 
-        return set((tuple(row) for row in self))
+    return f"SRID=4326;{geom}"
 
-    def table_exists(self, table):
-        """ Check that a table with the given name exists in the database.
-        """
-        num = self.scalar("""SELECT count(*) FROM pg_tables
-                             WHERE tablename = %s""", (table, ))
-        return num == 1
 
-    def table_rows(self, table):
-        """ Return the number of rows in the given table.
-        """
-        return self.scalar('SELECT count(*) FROM ' + table)
+@pytest.fixture
+def src_dir():
+    return SRC_DIR
 
 
 @pytest.fixture
@@ -55,26 +54,23 @@ def temp_db(monkeypatch):
         exported into NOMINATIM_DATABASE_DSN.
     """
     name = 'test_nominatim_python_unittest'
-    conn = psycopg2.connect(database='postgres')
 
-    conn.set_isolation_level(0)
-    with conn.cursor() as cur:
-        cur.execute('DROP DATABASE IF EXISTS {}'.format(name))
-        cur.execute('CREATE DATABASE {}'.format(name))
+    with psycopg.connect(dbname='postgres', autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(pysql.SQL('DROP DATABASE IF EXISTS') + pysql.Identifier(name))
+            cur.execute(pysql.SQL('CREATE DATABASE') + pysql.Identifier(name))
 
-    conn.close()
+    monkeypatch.setenv('NOMINATIM_DATABASE_DSN', 'dbname=' + name)
 
-    monkeypatch.setenv('NOMINATIM_DATABASE_DSN' , 'dbname=' + name)
+    with psycopg.connect(dbname=name) as conn:
+        with conn.cursor() as cur:
+            cur.execute('CREATE EXTENSION hstore')
 
     yield name
 
-    conn = psycopg2.connect(database='postgres')
-
-    conn.set_isolation_level(0)
-    with conn.cursor() as cur:
-        cur.execute('DROP DATABASE IF EXISTS {}'.format(name))
-
-    conn.close()
+    with psycopg.connect(dbname='postgres', autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(pysql.SQL('DROP DATABASE IF EXISTS') + pysql.Identifier(name))
 
 
 @pytest.fixture
@@ -84,19 +80,20 @@ def dsn(temp_db):
 
 @pytest.fixture
 def temp_db_with_extensions(temp_db):
-    conn = psycopg2.connect(database=temp_db)
-    with conn.cursor() as cur:
-        cur.execute('CREATE EXTENSION hstore; CREATE EXTENSION postgis;')
-    conn.commit()
-    conn.close()
+    with psycopg.connect(dbname=temp_db) as conn:
+        with conn.cursor() as cur:
+            cur.execute('CREATE EXTENSION postgis')
+            cur.execute('CREATE EXTENSION ltree')
 
     return temp_db
+
 
 @pytest.fixture
 def temp_db_conn(temp_db):
     """ Connection to the test database.
     """
-    with connection.connect('dbname=' + temp_db) as conn:
+    with connection.connect('', autocommit=True, dbname=temp_db) as conn:
+        connection.register_hstore(conn)
         yield conn
 
 
@@ -105,83 +102,108 @@ def temp_db_cursor(temp_db):
     """ Connection and cursor towards the test database. The connection will
         be in auto-commit mode.
     """
-    conn = psycopg2.connect('dbname=' + temp_db)
-    conn.set_isolation_level(0)
-    with conn.cursor(cursor_factory=_TestingCursor) as cur:
-        yield cur
-    conn.close()
+    with psycopg.connect(dbname=temp_db, autocommit=True, cursor_factory=CursorForTesting) as conn:
+        connection.register_hstore(conn)
+        with conn.cursor() as cur:
+            yield cur
 
 
 @pytest.fixture
-def table_factory(temp_db_cursor):
+def table_factory(temp_db_conn):
+    """ A fixture that creates new SQL tables, potentially filled with
+        content.
+    """
     def mk_table(name, definition='id INT', content=None):
-        temp_db_cursor.execute('CREATE TABLE {} ({})'.format(name, definition))
-        if content is not None:
-            if not isinstance(content, str):
-                content = '),('.join([str(x) for x in content])
-            temp_db_cursor.execute("INSERT INTO {} VALUES ({})".format(name, content))
+        with psycopg.ClientCursor(temp_db_conn) as cur:
+            cur.execute(pysql.SQL("CREATE TABLE {} ({})")
+                             .format(pysql.Identifier(name),
+                                     pysql.SQL(definition)))
+            if content:
+                sql = pysql.SQL("INSERT INTO {} VALUES ({})")\
+                           .format(pysql.Identifier(name),
+                                   pysql.SQL(',').join([pysql.Placeholder()
+                                                        for _ in range(len(content[0]))]))
+                cur.executemany(sql, content)
 
     return mk_table
 
 
 @pytest.fixture
 def def_config():
-    cfg = Configuration(None, SRC_DIR.resolve() / 'settings')
-    cfg.set_libdirs(module='.', osm2pgsql='.',
-                    php=SRC_DIR / 'lib-php',
-                    sql=SRC_DIR / 'lib-sql',
-                    data=SRC_DIR / 'data')
+    cfg = Configuration(None)
     return cfg
 
-@pytest.fixture
-def src_dir():
-    return SRC_DIR.resolve()
 
 @pytest.fixture
-def tmp_phplib_dir():
-    with tempfile.TemporaryDirectory() as phpdir:
-        (Path(phpdir) / 'admin').mkdir()
+def project_env(tmp_path):
+    projdir = tmp_path / 'project'
+    projdir.mkdir()
+    cfg = Configuration(projdir)
+    return cfg
 
-        yield Path(phpdir)
 
 @pytest.fixture
-def status_table(temp_db_conn):
+def country_table(table_factory):
+    table_factory('country_name', 'partition INT, country_code varchar(2), name hstore')
+
+
+@pytest.fixture
+def country_row(country_table, temp_db_cursor):
+    def _add(partition=None, country=None, names=None):
+        temp_db_cursor.insert_row('country_name', partition=partition,
+                                  country_code=country, name=names)
+
+    return _add
+
+
+@pytest.fixture
+def load_sql(temp_db_conn, country_table):
+    conf = Configuration(None)
+
+    def _run(*filename, **kwargs):
+        for fn in filename:
+            SQLPreprocessor(temp_db_conn, conf).run_sql_file(temp_db_conn, fn, **kwargs)
+
+    return _run
+
+
+@pytest.fixture
+def property_table(load_sql, temp_db_conn):
+    load_sql('tables/nominatim_properties.sql')
+
+    class _PropTable:
+        def set(self, name, value):
+            properties.set_property(temp_db_conn, name, value)
+
+        def get(self, name):
+            return properties.get_property(temp_db_conn, name)
+
+    return _PropTable()
+
+
+@pytest.fixture
+def status_table(load_sql):
     """ Create an empty version of the status table and
         the status logging table.
     """
-    with temp_db_conn.cursor() as cur:
-        cur.execute("""CREATE TABLE import_status (
-                           lastimportdate timestamp with time zone NOT NULL,
-                           sequence_id integer,
-                           indexed boolean
-                       )""")
-        cur.execute("""CREATE TABLE import_osmosis_log (
-                           batchend timestamp,
-                           batchseq integer,
-                           batchsize bigint,
-                           starttime timestamp,
-                           endtime timestamp,
-                           event text
-                           )""")
-    temp_db_conn.commit()
+    load_sql('tables/status.sql')
 
 
 @pytest.fixture
-def place_table(temp_db_with_extensions, temp_db_conn):
+def place_table(temp_db_with_extensions, table_factory):
     """ Create an empty version of the place table.
     """
-    with temp_db_conn.cursor() as cur:
-        cur.execute("""CREATE TABLE place (
-                           osm_id int8 NOT NULL,
-                           osm_type char(1) NOT NULL,
-                           class text NOT NULL,
-                           type text NOT NULL,
-                           name hstore,
-                           admin_level smallint,
-                           address hstore,
-                           extratags hstore,
-                           geometry Geometry(Geometry,4326) NOT NULL)""")
-    temp_db_conn.commit()
+    table_factory('place',
+                  """osm_id int8 NOT NULL,
+                     osm_type char(1) NOT NULL,
+                     class text NOT NULL,
+                     type text NOT NULL,
+                     name hstore,
+                     admin_level smallint,
+                     address HSTORE,
+                     extratags HSTORE,
+                     categories ltree[],
+                     geometry GEOMETRY(Geometry,4326) NOT NULL""")
 
 
 @pytest.fixture
@@ -190,101 +212,189 @@ def place_row(place_table, temp_db_cursor):
         prerequisite to the fixture.
     """
     idseq = itertools.count(1001)
+
     def _insert(osm_type='N', osm_id=None, cls='amenity', typ='cafe', names=None,
-                admin_level=None, address=None, extratags=None, geom=None):
-        temp_db_cursor.execute("INSERT INTO place VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                               (osm_id or next(idseq), osm_type, cls, typ, names,
-                                admin_level, address, extratags,
-                                geom or 'SRID=4326;POINT(0 0)'))
+                admin_level=None, address=None, extratags=None, categories=None,
+                geom='POINT(0 0)'):
+        args = {'osm_type': osm_type, 'osm_id': osm_id or next(idseq),
+                'class': cls, 'type': typ, 'name': names,
+                'admin_level': admin_level, 'address': address,
+                'extratags': extratags, 'categories': categories,
+                'geometry': _with_srid(geom)}
+        temp_db_cursor.insert_row('place', **args)
 
     return _insert
 
+
 @pytest.fixture
-def placex_table(temp_db_with_extensions, temp_db_conn):
-    """ Create an empty version of the place table.
+def place_postcode_table(temp_db_with_extensions, table_factory):
+    """ Create an empty version of the place_postcode table.
     """
-    with temp_db_conn.cursor() as cur:
-        cur.execute("""CREATE TABLE placex (
-                           place_id BIGINT,
-                           parent_place_id BIGINT,
-                           linked_place_id BIGINT,
-                           importance FLOAT,
-                           indexed_date TIMESTAMP,
-                           geometry_sector INTEGER,
-                           rank_address SMALLINT,
-                           rank_search SMALLINT,
-                           partition SMALLINT,
-                           indexed_status SMALLINT,
-                           osm_id int8,
-                           osm_type char(1),
-                           class text,
-                           type text,
-                           name hstore,
-                           admin_level smallint,
-                           address hstore,
-                           extratags hstore,
-                           geometry Geometry(Geometry,4326),
-                           wikipedia TEXT,
-                           country_code varchar(2),
-                           housenumber TEXT,
-                           postcode TEXT,
-                           centroid GEOMETRY(Geometry, 4326))""")
-    temp_db_conn.commit()
+    table_factory('place_postcode',
+                  """osm_type char(1) NOT NULL,
+                     osm_id bigint NOT NULL,
+                     postcode text NOT NULL,
+                     country_code TEXT,
+                     centroid GEOMETRY(Point, 4326) NOT NULL,
+                     geometry GEOMETRY(Geometry, 4326)""")
 
 
 @pytest.fixture
-def osmline_table(temp_db_with_extensions, temp_db_conn):
-    with temp_db_conn.cursor() as cur:
-        cur.execute("""CREATE TABLE location_property_osmline (
-                           place_id BIGINT,
-                           osm_id BIGINT,
-                           parent_place_id BIGINT,
-                           geometry_sector INTEGER,
-                           indexed_date TIMESTAMP,
-                           startnumber INTEGER,
-                           endnumber INTEGER,
-                           partition SMALLINT,
-                           indexed_status SMALLINT,
-                           linegeo GEOMETRY,
-                           interpolationtype TEXT,
-                           address HSTORE,
-                           postcode TEXT,
-                           country_code VARCHAR(2))""")
-    temp_db_conn.commit()
+def place_postcode_row(place_postcode_table, temp_db_cursor):
+    """ A factory for rows in the place_postcode table. The table is created as a
+        prerequisite to the fixture.
+    """
+    idseq = itertools.count(5001)
+
+    def _insert(osm_type='N', osm_id=None, postcode=None, country=None,
+                centroid='POINT(12.0 4.0)', geom=None):
+        temp_db_cursor.insert_row('place_postcode',
+                                  osm_type=osm_type, osm_id=osm_id or next(idseq),
+                                  postcode=postcode, country_code=country,
+                                  centroid=_with_srid(centroid),
+                                  geometry=_with_srid(geom))
+
+    return _insert
 
 
 @pytest.fixture
-def word_table(temp_db, temp_db_conn):
-    with temp_db_conn.cursor() as cur:
-        cur.execute("""CREATE TABLE word (
-                           word_id INTEGER,
-                           word_token text,
-                           word text,
-                           class text,
-                           type text,
-                           country_code varchar(2),
-                           search_name_count INTEGER,
-                           operator TEXT)""")
-    temp_db_conn.commit()
+def place_interpolation_table(temp_db_with_extensions, table_factory):
+    """ Create an empty version of the place_interpolation table.
+    """
+    table_factory('place_interpolation',
+                  """osm_id bigint NOT NULL,
+                     type TEXT,
+                     address HSTORE,
+                     nodes BIGINT[],
+                     geometry GEOMETRY(Geometry, 4326)""")
 
 
 @pytest.fixture
-def osm2pgsql_options(temp_db):
-    return dict(osm2pgsql='echo',
-                osm2pgsql_cache=10,
-                osm2pgsql_style='style.file',
-                threads=1,
-                dsn='dbname=' + temp_db,
-                flatnode_file='',
-                tablespaces=dict(slim_data='', slim_index='',
-                                 main_data='', main_index=''))
+def place_interpolation_row(place_interpolation_table, temp_db_cursor):
+    """ A factory for rows in the place_interpolation table. The table is created as a
+        prerequisite to the fixture.
+    """
+    idseq = itertools.count(30001)
+
+    def _insert(osm_id=None, typ='odd', address=None,
+                nodes=None, geom='LINESTRING(0.1 0.21, 0.1 0.2)'):
+        params = {'osm_id': osm_id or next(idseq),
+                  'type': typ, 'address': address, 'nodes': nodes,
+                  'geometry': _with_srid(geom)}
+        temp_db_cursor.insert_row('place_interpolation', **params)
+
+    return _insert
+
 
 @pytest.fixture
-def sql_preprocessor(temp_db_conn, tmp_path, monkeypatch, table_factory):
-    monkeypatch.setenv('NOMINATIM_DATABASE_MODULE_PATH', '.')
-    table_factory('country_name', 'partition INT', (0, 1, 2))
-    cfg = Configuration(None, SRC_DIR.resolve() / 'settings')
-    cfg.set_libdirs(module='.', osm2pgsql='.', php=SRC_DIR / 'lib-php',
-                    sql=tmp_path, data=SRC_DIR / 'data')
+def placex_table(temp_db_with_extensions, temp_db_conn, load_sql, place_table):
+    """ Create an empty version of the placex table.
+    """
+    load_sql('tables/placex.sql')
+    temp_db_conn.execute("CREATE SEQUENCE IF NOT EXISTS seq_place START 1")
 
-    return SQLPreprocessor(temp_db_conn, cfg)
+
+@pytest.fixture
+def placex_row(placex_table, temp_db_cursor):
+    """ A factory for rows in the placex table. The table is created as a
+        prerequisite to the fixture.
+    """
+    idseq = itertools.count(1001)
+
+    def _add(osm_type='N', osm_id=None, cls='amenity', typ='cafe', names=None,
+             admin_level=None, address=None, extratags=None, categories=None,
+             geom='POINT(10 4)', country=None, housenumber=None, rank_search=30,
+             rank_address=30, centroid='POINT(10 4)', indexed_status=0,
+             indexed_date=None, importance=0.00001):
+        args = {'place_id': pysql.SQL("nextval('seq_place')"),
+                'osm_type': osm_type, 'osm_id': osm_id or next(idseq),
+                'class': cls, 'type': typ, 'name': names, 'admin_level': admin_level,
+                'address': address, 'housenumber': housenumber,
+                'rank_search': rank_search, 'rank_address': rank_address,
+                'extratags': extratags, 'categories': categories, 'importance': importance,
+                'centroid': _with_srid(centroid), 'geometry': _with_srid(geom),
+                'country_code': country,
+                'indexed_status': indexed_status, 'indexed_date': indexed_date,
+                'partition': pysql.Literal(0), 'geometry_sector': pysql.Literal(1)}
+        return temp_db_cursor.insert_row('placex', **args)
+
+    return _add
+
+
+@pytest.fixture
+def osmline_table(temp_db_with_extensions, load_sql):
+    load_sql('tables/interpolation.sql')
+
+
+@pytest.fixture
+def osmline_row(osmline_table, temp_db_cursor):
+    idseq = itertools.count(20001)
+
+    def _add(osm_id=None, geom='LINESTRING(12.0 11.0, 12.003 11.0)'):
+        return temp_db_cursor.insert_row(
+            'location_property_osmline',
+            place_id=pysql.SQL("nextval('seq_place')"),
+            osm_id=osm_id or next(idseq),
+            geometry_sector=pysql.Literal(20),
+            partition=pysql.Literal(0),
+            indexed_status=1,
+            linegeo=_with_srid(geom))
+
+    return _add
+
+
+@pytest.fixture
+def postcode_table(temp_db_with_extensions, load_sql):
+    load_sql('tables/postcodes.sql')
+
+
+@pytest.fixture
+def postcode_row(postcode_table, temp_db_cursor):
+    def _add(country, postcode, x=34.5, y=-9.33, is_area=False):
+        geom = _with_srid(f"POINT({x} {y})")
+        return temp_db_cursor.insert_row(
+            'location_postcodes',
+            place_id=pysql.SQL("nextval('seq_place')"),
+            indexed_status=pysql.Literal(1),
+            country_code=country, postcode=postcode, is_area=is_area,
+            centroid=geom,
+            rank_search=pysql.Literal(16),
+            geometry=('ST_Expand(%s::geometry, 0.005)', geom))
+
+    return _add
+
+
+@pytest.fixture
+def sql_preprocessor_cfg(tmp_path, table_factory, temp_db_with_extensions, country_row):
+    for part in range(3):
+        country_row(partition=part)
+
+    cfg = Configuration(None)
+    cfg.set_libdirs(sql=tmp_path)
+    return cfg
+
+
+@pytest.fixture
+def sql_preprocessor(sql_preprocessor_cfg, temp_db_conn):
+    return SQLPreprocessor(temp_db_conn, sql_preprocessor_cfg)
+
+
+@pytest.fixture
+def tokenizer_mock(monkeypatch, property_table):
+    """ Sets up the configuration so that the test dummy tokenizer will be
+        loaded when the tokenizer factory is used. Also returns a factory
+        with which a new dummy tokenizer may be created.
+    """
+    monkeypatch.setenv('NOMINATIM_TOKENIZER', 'dummy')
+
+    def _import_dummy(*args, **kwargs):
+        return dummy_tokenizer
+
+    monkeypatch.setattr(nominatim_db.tokenizer.factory,
+                        "_import_tokenizer", _import_dummy)
+    property_table.set('tokenizer', 'dummy')
+
+    def _create_tokenizer():
+        return dummy_tokenizer.DummyTokenizer(None)
+
+    return _create_tokenizer

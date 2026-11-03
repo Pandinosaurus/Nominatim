@@ -3,151 +3,535 @@ name: CI Tests
 on: [ push, pull_request ]
 
 jobs:
-    tests:
-        runs-on: ubuntu-20.04
-
-        strategy:
-            matrix:
-                postgresql: [9.5, 13]
-                include:
-                    - postgresql: 9.5
-                      postgis: 2.5
-                    - postgresql: 13
-                      postgis: 3
+    create-archive:
+        runs-on: ubuntu-latest
 
         steps:
-            - uses: actions/checkout@v2
+            - uses: actions/checkout@v7
               with:
-                  submodules: true
-                  path: Nominatim
+                submodules: true
 
-            - name: Setup PHP
-              uses: shivammathur/setup-php@v2
-              with:
-                  php-version: '7.4'
-                  tools: phpunit, phpcs, composer
-
-            - name: Get Date
-              id: get-date
-              run: |
-                  echo "::set-output name=date::$(/bin/date -u "+%Y%W")"
-              shell: bash
-
-            - uses: actions/cache@v2
+            - uses: actions/cache@v6
               with:
                   path: |
-                     country_grid.sql.gz
-                  key: nominatim-country-data-${{ steps.get-date.outputs.date }}
+                     data/country_osm_grid.sql.gz
+                  key: nominatim-country-data-1
+
+            - name: Package tarball
+              run: |
+                  if [ ! -f data/country_osm_grid.sql.gz ]; then
+                      wget --no-verbose -O data/country_osm_grid.sql.gz https://www.nominatim.org/data/country_grid.sql.gz
+                  fi
+                  cd ..
+                  tar czf nominatim-src.tar.bz2 Nominatim
+                  mv nominatim-src.tar.bz2 Nominatim
+
+            - name: 'Upload Artifact'
+              uses: actions/upload-artifact@v7
+              with:
+                  name: full-source
+                  path: nominatim-src.tar.bz2
+                  retention-days: 1
+
+    linting:
+        needs: create-archive
+        runs-on: ubuntu-26.04
+        steps:
+            - uses: actions/download-artifact@v8
+              with:
+                  name: full-source
+
+            - name: Unpack Nominatim
+              run: tar xf nominatim-src.tar.bz2
+
+            - name: Install general prerequisites
+              run: |
+                sudo apt-get install -y -qq virtualenv python3-dev
+              shell: bash
+
+            - name: Setup virtual environment (for pip)
+              run: |
+                virtualenv venv
+                ./venv/bin/pip install -U pip
+              shell: bash
+
+            - name: Install test prerequisites (pip)
+              run: ../venv/bin/pip install --group dev --group runtime
+              working-directory: Nominatim
+
+            - name: Python linting
+              run: ../venv/bin/python -m flake8 src test/python test/bdd
+              working-directory: Nominatim
+
+            - name: Python static typechecking
+              run: ../venv/bin/python -m mypy src
+              working-directory: Nominatim
+
+
+    tests-ubuntu:
+        needs: create-archive
+        strategy:
+            matrix:
+                flavour: ["ubuntu-24", "ubuntu-26"]
+                include:
+                    - flavour: ubuntu-24
+                      ubuntu: 24
+                      postgresql: 13
+                      dependencies: pip
+                      python: '3.9'
+                    - flavour: ubuntu-26
+                      ubuntu: 26
+                      postgresql: 18
+                      dependencies: apt
+                      python: 'builtin'
+
+        runs-on: ubuntu-${{ matrix.ubuntu }}.04
+
+        steps:
+            - uses: actions/download-artifact@v8
+              with:
+                  name: full-source
+
+            - name: Unpack Nominatim
+              run: tar xf nominatim-src.tar.bz2
 
             - uses: ./Nominatim/.github/actions/setup-postgresql
               with:
                   postgresql-version: ${{ matrix.postgresql }}
-                  postgis-version: ${{ matrix.postgis }}
+
             - uses: ./Nominatim/.github/actions/build-nominatim
+              with:
+                  dependencies: ${{ matrix.dependencies }}
 
-            - name: Install test prerequsites
-              run: sudo apt-get install -y -qq php-codesniffer pylint python3-pytest python3-behave python3-pytest-cov php-codecoverage php-xdebug
+            - name: Set up Python
+              uses: actions/setup-python@v7
+              with:
+                  python-version: ${{ matrix.python }}
+              if: matrix.python != 'builtin'
 
-            - name: PHP linting
-              run: phpcs --report-width=120 .
+            - name: Install test prerequisites (apt)
+              run: |
+                  sudo apt-get install -y -qq python3-pytest python3-pytest-asyncio uvicorn python3-falcon python3-aiosqlite python3-pyosmium
+                  ./venv/bin/pip install -U pytest-bdd
+              if: matrix.dependencies == 'apt'
+
+            - name: Install test prerequisites (pip)
+              run: ../venv/bin/pip install --group test --group serve
               working-directory: Nominatim
-
-            - name: Python linting
-              run: pylint --extension-pkg-whitelist=osmium nominatim
-              working-directory: Nominatim
-
-            - name: PHP unit tests
-              run: phpunit --coverage-clover ../../coverage-php.xml ./
-              working-directory: Nominatim/test/php
+              if: matrix.dependencies == 'pip'
 
             - name: Python unit tests
-              run: py.test-3 --cov=nominatim --cov-report=xml test/python
+              run: ../venv/bin/python -m pytest test/python
               working-directory: Nominatim
 
             - name: BDD tests
-              run: |
-                  behave -DREMOVE_TEMPLATE=1 -DBUILDDIR=$GITHUB_WORKSPACE/build --format=progress3 -DPHPCOV=./cov
-                  composer require phpunit/phpcov:7.0.2
-                  vendor/bin/phpcov merge --clover ../../coverage-bdd.xml ./cov
-              working-directory: Nominatim/test/bdd
+              run: ../venv/bin/python -m pytest test/bdd --nominatim-purge
+              working-directory: Nominatim
 
-            - name: Upload coverage to Codecov
-              uses: codecov/codecov-action@v1
-              with:
-                files: ./Nominatim/coverage*.xml
-                directory: ./
-                name: codecov-umbrella
-                fail_ci_if_error: true
-                path_to_write_report: ./coverage/codecov_report.txt
-                verbose: true
-
-    import:
-        runs-on: ubuntu-20.04
+    tests-windows:
+        needs: create-archive
+        strategy:
+            matrix:
+                python: ['3.10', '3.14']
+                include:
+                    - python: '3.10'
+                      pyicu: 'v2.15/pyicu-2.15-cp310-cp310-win_amd64.whl'
+                    - python: '3.14'
+                      pyicu: 'v2.16.2/pyicu-2.16.2-cp314-cp314-win_amd64.whl'
+        runs-on: windows-latest
 
         steps:
-            - uses: actions/checkout@v2
+            - uses: actions/download-artifact@v8
               with:
-                  submodules: true
-                  path: Nominatim
+                  name: full-source
 
-            - name: Get Date
-              id: get-date
+            - name: Unpack Nominatim
+              run: tar xf nominatim-src.tar.bz2
+
+            - uses: ./Nominatim/.github/actions/setup-postgresql-windows
+              with:
+                  postgresql-version: 17
+
+            - name: Set up Python
+              uses: actions/setup-python@v7
+              with:
+                  python-version: ${{ matrix.python }}
+
+            - uses: actions/cache@v6
+              with:
+                  path: |
+                     C:\osm2pgsql
+                  key: osm2pgsql-windows-1
+
+            - name: Install Spatialite
               run: |
-                  echo "::set-output name=date::$(/bin/date -u "+%Y%W")"
+                  Invoke-WebRequest -Uri "https://www.gaia-gis.it/gaia-sins/windows-bin-amd64/mod_spatialite-5.1.0-win-amd64.7z" -OutFile "spatialite.7z"
+                  7z x spatialite.7z -o"C:\spatialite"
+                  echo "C:\spatialite\mod_spatialite-5.1.0-win-amd64" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+            - name: Install osm2pgsql
+              run: |
+                  if (-not (Test-Path "C:\osm2pgsql")) {
+                    Invoke-WebRequest -Uri "https://osm2pgsql.org/download/windows/osm2pgsql-latest-x64.zip" -OutFile "osm2pgsql.zip"
+                    Expand-Archive -Path "osm2pgsql.zip" -DestinationPath "C:\osm2pgsql"
+                  }
+                  $BinDir = Get-ChildItem -Path "C:\osm2pgsql" -Recurse -Filter "osm2pgsql.exe" | Select-Object -ExpandProperty DirectoryName | Select-Object -First 1
+                  if (-not $BinDir) {
+                      Write-Error "Could not find osm2pgsql.exe"
+                      exit 1
+                  }
+                  echo "$BinDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+                  $FullExePath = Join-Path $BinDir "osm2pgsql.exe"
+                  echo "NOMINATIM_OSM2PGSQL_BINARY=$FullExePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+            - name: Set UTF-8 encoding
+              run: |
+                  [System.Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+            - name: Install PyICU from wheel
+              run: |
+                  python -m pip install https://github.com/cgohlke/pyicu-build/releases/download/${{ matrix.pyicu }}
+
+            - name: Install test prerequisites
+              run: |
+                  python -m pip install -U pip
+                  python -m pip install --group runtime --group serve --group test
+              working-directory: Nominatim
+
+            - name: Python unit tests
+              run: |
+                  python -m pytest test/python -k "not (import_osm or run_osm2pgsql)"
+              working-directory: Nominatim
+
+    install-ubuntu:
+        runs-on: ubuntu-latest
+        needs: create-archive
+
+        strategy:
+            matrix:
+                name: [Ubuntu-22, Ubuntu-24]
+                include:
+                    - name: Ubuntu-22
+                      image: "ubuntu:22.04"
+                      ubuntu: 22
+                      install_mode: install-apache
+                    - name: Ubuntu-24
+                      image: "ubuntu:24.04"
+                      ubuntu: 24
+                      install_mode: install-apache
+
+        container:
+            image: ${{ matrix.image }}
+            env:
+                LANG: en_US.UTF-8
+
+        defaults:
+            run:
+                shell: sudo -Hu nominatim bash --noprofile --norc -eo pipefail {0}
+
+        steps:
+            - name: Prepare container (Ubuntu)
+              run: |
+                  export APT_LISTCHANGES_FRONTEND=none
+                  export DEBIAN_FRONTEND=noninteractive
+                  apt-get update -qq
+                  apt-get install -y git sudo wget
+                  ln -snf /usr/share/zoneinfo/$CONTAINER_TIMEZONE /etc/localtime && echo $CONTAINER_TIMEZONE > /etc/timezone
               shell: bash
 
-            - uses: actions/cache@v2
-              with:
-                  path: |
-                     country_grid.sql.gz
-                  key: nominatim-country-data-${{ steps.get-date.outputs.date }}
-
-            - uses: actions/cache@v2
-              with:
-                  path: |
-                     monaco-latest.osm.pbf
-                  key: nominatim-test-data-${{ steps.get-date.outputs.date }}
-
-            - uses: ./Nominatim/.github/actions/setup-postgresql
-              with:
-                  postgresql-version: 13
-                  postgis-version: 3
-            - uses: ./Nominatim/.github/actions/build-nominatim
-
-            - name: Clean installation
-              run: rm -rf Nominatim build
+            - name: Setup import user
+              run: |
+                  useradd -m nominatim
+                  echo 'nominatim   ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/nominiatim
+                  echo "/home/nominatim/Nominatim/vagrant/Install-on-${OS}.sh no $INSTALL_MODE" > /home/nominatim/vagrant.sh
               shell: bash
+              env:
+                OS: ${{ matrix.name }}
+                INSTALL_MODE: ${{ matrix.install_mode }}
+
+            - uses: actions/download-artifact@v8
+              with:
+                  name: full-source
+                  path: /home/nominatim
+
+            - name: Install Nominatim
+              run: |
+                export USERNAME=nominatim
+                export USERHOME=/home/nominatim
+                export NOSYSTEMD=yes
+                export HAVE_SELINUX=no
+                tar xf nominatim-src.tar.bz2
+                . vagrant.sh
+              working-directory: /home/nominatim
 
             - name: Prepare import environment
               run: |
-                  if [ ! -f monaco-latest.osm.pbf ]; then
-                      wget --no-verbose https://download.geofabrik.de/europe/monaco-latest.osm.pbf
-                  fi
-                  mkdir data-env
-                  cd data-env
-              shell: bash
+                  mv Nominatim/test/testdb/apidb-test-data.pbf test.pbf
+                  rm -rf Nominatim
+                  mkdir data-env-reverse
+              working-directory: /home/nominatim
+
+            - name: Add nominatim to path
+              run: |
+                sudo ln -s /home/nominatim/nominatim-venv/bin/nominatim /usr/local/bin/nominatim
+
+            - name: Need lua binary
+              run: |
+                sudo apt-get install -y lua5.4 lua-dkjson
+
+            - name: Print version
+              run: nominatim --version
+              working-directory: /home/nominatim/nominatim-project
+
+            - name: Print taginfo
+              run: lua ./nominatim-venv/lib/*/site-packages/nominatim_db/resources/lib-lua/taginfo.lua
+              working-directory: /home/nominatim
+
+            - name: Collect host OS information
+              run: nominatim admin --collect-os-info
+              working-directory: /home/nominatim/nominatim-project
 
             - name: Import
-              run: nominatim import --osm-file ../monaco-latest.osm.pbf
-              shell: bash
-              working-directory: data-env
+              run: nominatim import --osm-file ../test.pbf
+              working-directory: /home/nominatim/nominatim-project
 
             - name: Import special phrases
               run: nominatim special-phrases --import-from-wiki
-              working-directory: data-env
+              working-directory: /home/nominatim/nominatim-project
 
-            - name: Check import
+            - name: Check full import
               run: nominatim admin --check-database
-              working-directory: data-env
+              working-directory: /home/nominatim/nominatim-project
+
+            - name: Warm up database
+              run: nominatim admin --warm
+              working-directory: /home/nominatim/nominatim-project
+
+            - name: Install osmium
+              run: |
+                  /home/nominatim/nominatim-venv/bin/pip install osmium
 
             - name: Run update
               run: |
-                   nominatim replication --init
-                   nominatim replication --once
-              working-directory: data-env
+                  nominatim replication --init
+                  NOMINATIM_REPLICATION_MAX_DIFF=1 nominatim replication --once
+              working-directory: /home/nominatim/nominatim-project
+
+            - name: Clean up database
+              run: nominatim refresh --postcodes --word-tokens
+              working-directory: /home/nominatim/nominatim-project
 
             - name: Run reverse-only import
-              run : nominatim import --osm-file ../monaco-latest.osm.pbf --reverse-only
-              working-directory: data-env
-              env:
-                  NOMINATIM_DATABASE_DSN: pgsql:dbname=reverse
+              run : |
+                  echo 'NOMINATIM_DATABASE_DSN="pgsql:dbname=reverse"' >> .env
+                  nominatim import --osm-file ../test.pbf --reverse-only --no-updates
+              working-directory: /home/nominatim/data-env-reverse
+
+            - name: Check reverse-only import
+              run: nominatim admin --check-database
+              working-directory: /home/nominatim/data-env-reverse
+
+            - name: Clean up database (reverse-only import)
+              run: nominatim refresh --postcodes --word-tokens
+              working-directory: /home/nominatim/nominatim-project
+
+    install-windows:
+        strategy:
+            matrix:
+                python: ['3.10', '3.14']
+                include:
+                    - python: '3.10'
+                      pyicu: 'v2.15/pyicu-2.15-cp310-cp310-win_amd64.whl'
+                    - python: '3.14'
+                      pyicu: 'v2.16.2/pyicu-2.16.2-cp314-cp314-win_amd64.whl'
+        runs-on: windows-latest
+        needs: create-archive
+        steps:
+            - uses: actions/download-artifact@v8
+              with:
+                  name: full-source
+
+            - name: Unpack Nominatim
+              run: tar xf nominatim-src.tar.bz2
+
+            - uses: ./Nominatim/.github/actions/setup-postgresql-windows
+              with:
+                  postgresql-version: 17
+
+            - name: Set up Python
+              uses: actions/setup-python@v7
+              with:
+                  python-version: ${{ matrix.python }}
+
+            - uses: actions/cache@v6
+              with:
+                  path: |
+                     C:\osm2pgsql
+                  key: osm2pgsql-windows-1
+
+            - name: Install osm2pgsql
+              run: |
+                  if (-not (Test-Path "C:\osm2pgsql")) {
+                    Invoke-WebRequest -Uri "https://osm2pgsql.org/download/windows/osm2pgsql-latest-x64.zip" -OutFile "osm2pgsql.zip"
+                    Expand-Archive -Path "osm2pgsql.zip" -DestinationPath "C:\osm2pgsql"
+                  }
+                  $BinDir = Get-ChildItem -Path "C:\osm2pgsql" -Recurse -Filter "osm2pgsql.exe" | Select-Object -ExpandProperty DirectoryName | Select-Object -First 1
+                  if (-not $BinDir) {
+                      Write-Error "Could not find osm2pgsql.exe"
+                      exit 1
+                  }
+                  echo "$BinDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+                  $FullExePath = Join-Path $BinDir "osm2pgsql.exe"
+                  echo "NOMINATIM_OSM2PGSQL_BINARY=$FullExePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+            - name: Setup virtual environment
+              run: |
+                  python -m venv venv
+                  .\venv\Scripts\python.exe -m pip install -U pip
+                  .\venv\Scripts\Activate.ps1
+              working-directory: Nominatim
+
+            - name: Install dependencies (pip)
+              run: |
+                  pip install "psycopg[binary]!=3.3.0" async-timeout python-dotenv pyyaml jinja2 psutil "sqlalchemy[asyncio]<2.1" falcon starlette uvicorn osmium mwparserfromhell
+                  pip install https://github.com/cgohlke/pyicu-build/releases/download/${{ matrix.pyicu }}
+              working-directory: Nominatim
+
+            - name: Prepare import environment
+              run: |
+                  Move-Item -Path "test\testdb\apidb-test-data.pbf" -Destination "test.pbf"
+                  mkdir data-env-reverse
+              working-directory: Nominatim
+
+            - name: Print version
+              run: |
+                  python nominatim-cli.py --version
+              working-directory: Nominatim
+
+            - name: Collect host OS information
+              run: python .\nominatim-cli.py admin --collect-os-info
+              working-directory: Nominatim
+
+            - name: Import
+              run: python .\nominatim-cli.py import --osm-file .\test.pbf
+              working-directory: Nominatim
+
+            - name: Import special phrases
+              run: python .\nominatim-cli.py special-phrases --import-from-wiki
+              working-directory: Nominatim
+
+            - name: Check full import
+              run: python .\nominatim-cli.py admin --check-database
+              working-directory: Nominatim
+
+            - name: Warm up database
+              run: python .\nominatim-cli.py admin --warm
+              working-directory: Nominatim
+
+            - name: Run update
+              run: |
+                  python .\nominatim-cli.py replication --init
+                  python .\nominatim-cli.py replication --once
+              working-directory: Nominatim
+
+            - name: Clean up database
+              run: python .\nominatim-cli.py refresh --postcodes --word-tokens
+              working-directory: Nominatim
+
+            - name: Run reverse-only import
+              run : |
+                  echo 'NOMINATIM_DATABASE_DSN="pgsql:dbname=reverse"' >> .env
+                  python ..\nominatim-cli.py import --osm-file ..\test.pbf --reverse-only --no-updates
+              working-directory: Nominatim/data-env-reverse
+
+            - name: Check reverse-only import
+              run: python ..\nominatim-cli.py admin --check-database
+              working-directory: Nominatim/data-env-reverse
+
+            - name: Clean up database (reverse-only import)
+              run: python ..\nominatim-cli.py refresh --postcodes --word-tokens
+              working-directory: Nominatim/data-env-reverse
+
+    install-no-superuser:
+      runs-on: ubuntu-26.04
+      needs: create-archive
+
+      steps:
+          - uses: actions/download-artifact@v8
+            with:
+                name: full-source
+
+          - name: Unpack Nominatim
+            run: tar xf nominatim-src.tar.bz2
+
+          - uses: ./Nominatim/.github/actions/setup-postgresql
+            with:
+                postgresql-version: 16
+
+          - uses: ./Nominatim/.github/actions/build-nominatim
+
+          - name: Prepare import environment
+            run: |
+                mv Nominatim/test/testdb/apidb-test-data.pbf test.pbf
+                rm -rf Nominatim
+
+          - name: Prepare Database
+            run: |
+                ./venv/bin/nominatim import --prepare-database
+
+          - name: Create import user
+            run: |
+                sudo -u postgres createuser osm-import
+                psql -d nominatim -c "ALTER USER \"osm-import\" WITH PASSWORD 'osm-import'"
+                psql -d nominatim -c 'GRANT CREATE ON SCHEMA public TO "osm-import"'
+
+          - name: Run import
+            run: |
+                NOMINATIM_DATABASE_DSN="pgsql:host=127.0.0.1;dbname=nominatim;user=osm-import;password=osm-import" ./venv/bin/nominatim import --continue import-from-file --osm-file test.pbf
+
+          - name: Check full import
+            run: ./venv/bin/nominatim admin --check-database
+
+    migrate:
+      runs-on: ubuntu-26.04
+      needs: create-archive
+
+      steps:
+          - uses: actions/download-artifact@v8
+            with:
+                name: full-source
+
+          - name: Unpack Nominatim
+            run: tar xf nominatim-src.tar.bz2
+
+          - uses: ./Nominatim/.github/actions/setup-postgresql
+            with:
+                postgresql-version: 18
+
+          - name: Install Python dependencies
+            run: |
+              sudo apt-get install --no-install-recommends virtualenv osm2pgsql
+
+          - name: Install Nominatim master version
+            run: |
+              virtualenv master
+              cd Nominatim
+              ../master/bin/pip install packaging/nominatim-db
+
+          - name: Install Nominatim from pypi
+            run: |
+              virtualenv release
+              ./release/bin/pip install nominatim-db
+
+          - name: Import Nominatim database using release
+            run: |
+              ./release/bin/nominatim import --osm-file Nominatim/test/testdb/apidb-test-data.pbf
+
+          - name: Migrate to master version
+            run: |
+              ./master/bin/nominatim admin --migrate
+
+          - name: Test adding data on migrated database
+            run: |
+              ./master/bin/nominatim add-data --file Nominatim/test/testdb/additional_api_test.data.osm
+              ./master/bin/nominatim index

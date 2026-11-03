@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# This file is part of Nominatim. (https://nominatim.org)
+#
+# Copyright (C) 2026 by the Nominatim developer community.
+# For a full list of authors see the git log.
+"""
+Sanitizer that filters postcodes by their officially allowed pattern.
+
+Arguments:
+    convert-to-address: If set to 'yes' (the default), then postcodes that do
+                        not conform with their country-specific pattern are
+                        converted to an address component. That means that
+                        the postcode does not take part when computing the
+                        postcode centroids of a country but is still searchable.
+                        When set to 'no', non-conforming postcodes are not
+                        searchable either.
+    default-pattern:    Pattern to use, when there is none available for the
+                        country in question. Warning: will not be used for
+                        objects that have no country assigned. These are always
+                        assumed to have no postcode.
+"""
+from typing import Optional
+
+from ...data.postcode_format import PostcodeFormatter
+from .base import ProcessInfo, SanitizerFunc
+from .config import SanitizerConfig
+
+
+class _PostcodeSanitizer:
+
+    def __init__(self, config: SanitizerConfig) -> None:
+        self.convert_to_address = config.get_bool('convert-to-address', True)
+        self.matcher = PostcodeFormatter()
+
+        default_pattern = config.get('default-pattern')
+        if default_pattern is not None and isinstance(default_pattern, str):
+            self.matcher.set_default_pattern(default_pattern)
+
+    def __call__(self, obj: ProcessInfo) -> None:
+        if not obj.address:
+            return
+
+        postcodes = ((i, o) for i, o in enumerate(obj.address) if o.kind == 'postcode')
+        to_delete = []
+
+        for pos, postcode in postcodes:
+            if (norm := self.scan(postcode.name, obj.place.country_code)) is not None:
+                postcode.name = norm
+            else:
+                if self.convert_to_address:
+                    postcode.kind = 'unofficial_postcode'
+                else:
+                    to_delete.append(pos)
+
+        if to_delete:
+            obj.address = [o for i, o in enumerate(obj.address) if i not in to_delete]
+
+    def scan(self, postcode: str, country: Optional[str]) -> Optional[str]:
+        """ Check the postcode for correct formatting and return the
+            normalized version. Returns None if the postcode does not
+            correspond to the official format of the given country.
+        """
+        if (fmt := self.matcher.get_matcher(country)) is not None:
+            if (m := fmt.match(postcode)) is not None:
+                return m.norm
+
+        return None
+
+
+def create(config: SanitizerConfig) -> SanitizerFunc:
+    """ Create a function that filters postcodes by their officially allowed pattern.
+    """
+
+    return _PostcodeSanitizer(config)

@@ -9,7 +9,7 @@
 #         1) pyosmium-get-changes (with -f sequence.state for getting sequenceNumber)
 
 #     *) Import diff
-#         1) utils/update.php --import-diff
+#         1) nominatim add-data --diff
 
 #     *) Index for all the countries at the end
 
@@ -22,38 +22,22 @@
 
 # REPLACE WITH LIST OF YOUR "COUNTRIES":
 #
-
-
 COUNTRIES="europe/monaco europe/andorra"
-
-# SET TO YOUR NOMINATIM build FOLDER PATH:
-#
-NOMINATIMBUILD="/srv/nominatim/build"
-UPDATEFILE="$NOMINATIMBUILD/utils/update.php"
-
-# SET TO YOUR update data FOLDER PATH:
-#
-UPDATEDIR="/srv/nominatim/update"
 
 UPDATEBASEURL="https://download.geofabrik.de"
 UPDATECOUNTRYPOSTFIX="-updates"
 
-# If you do not use Photon, let Nominatim handle (re-)indexing:
+# If you use Photon, update it, too (Photon server must be running and must have
+# been started with "-database", "-user", "-password" and "-enable-update-api"
+# parameters):
 #
-FOLLOWUP="$UPDATEFILE --index"
-#
-# If you use Photon, update Photon and let it handle the index
-# (Photon server must be running and must have been started with "-database",
-# "-user" and "-password" parameters):
-#
-#FOLLOWUP="curl http://localhost:2322/nominatim-update"
+#PHOTON_UPDATE="curl http://localhost:2322/nominatim-update"
+PHOTON_UPDATE="" # Just set to an empty string, if not wanted.
 
 # ******************************************************************************
+UPDATEDIR="update"
 
-
-for COUNTRY in $COUNTRIES;
-do
-    
+for COUNTRY in $COUNTRIES; do
     echo "===================================================================="
     echo "$COUNTRY"
     echo "===================================================================="
@@ -61,20 +45,23 @@ do
     FILE="$DIR/sequence.state"
     BASEURL="$UPDATEBASEURL/$COUNTRY$UPDATECOUNTRYPOSTFIX"
     FILENAME=${COUNTRY//[\/]/_}
-    
-    # mkdir -p ${DIR}
-    cd ${DIR}
 
     echo "Attempting to get changes"
+    rm -f ${DIR}/${FILENAME}.osc.gz
     pyosmium-get-changes -o ${DIR}/${FILENAME}.osc.gz -f ${FILE} --server $BASEURL -v
 
     echo "Attempting to import diffs"
-    ${NOMINATIMBUILD}/utils/update.php --import-diff ${DIR}/${FILENAME}.osc.gz
-    rm ${DIR}/${FILENAME}.osc.gz
-
+    nominatim add-data --diff ${DIR}/${FILENAME}.osc.gz
 done
 
 echo "===================================================================="
-echo "Reindexing" 
-${FOLLOWUP}
+echo "Reindexing"
+nominatim index
 echo "===================================================================="
+
+if [ -n "$PHOTON_UPDATE" ]; then
+  echo "===================================================================="
+  echo "Triggering asynchronous Photon update"
+  ${PHOTON_UPDATE}
+  echo "===================================================================="
+fi

@@ -1,3 +1,10 @@
+-- SPDX-License-Identifier: GPL-2.0-only
+--
+-- This file is part of Nominatim. (https://nominatim.org)
+--
+-- Copyright (C) 2026 by the Nominatim developer community.
+-- For a full list of authors see the git log.
+
 DROP TYPE IF EXISTS nearfeaturecentr CASCADE;
 CREATE TYPE nearfeaturecentr AS (
   place_id BIGINT,
@@ -10,29 +17,10 @@ CREATE TYPE nearfeaturecentr AS (
   centroid GEOMETRY
 );
 
--- feature intersects geoemtry
--- for areas and linestrings they must touch at least along a line
-CREATE OR REPLACE FUNCTION is_relevant_geometry(de9im TEXT, geom_type TEXT)
-RETURNS BOOLEAN
-AS $$
-BEGIN
-  IF substring(de9im from 1 for 2) != 'FF' THEN
-    RETURN TRUE;
-  END IF;
-
-  IF geom_type = 'ST_Point' THEN
-    RETURN substring(de9im from 4 for 1) = '0';
-  END IF;
-
-  IF geom_type in ('ST_LineString', 'ST_MultiLineString') THEN
-    RETURN substring(de9im from 4 for 1) = '1';
-  END IF;
-
-  RETURN substring(de9im from 4 for 1) = '2';
-END
-$$ LANGUAGE plpgsql IMMUTABLE;
-
-create or replace function getNearFeatures(in_partition INTEGER, feature GEOMETRY, maxrank INTEGER) RETURNS setof nearfeaturecentr AS $$
+CREATE OR REPLACE function getNearFeatures(in_partition INTEGER, feature GEOMETRY,
+                                           feature_centroid GEOMETRY,
+                                           maxrank INTEGER)
+RETURNS setof nearfeaturecentr AS $$
 DECLARE
   r nearfeaturecentr%rowtype;
 BEGIN
@@ -41,11 +29,20 @@ BEGIN
   IF in_partition = {{ partition }} THEN
     FOR r IN
       SELECT place_id, keywords, rank_address, rank_search,
-             min(ST_Distance(feature, centroid)) as distance,
+             CASE WHEN isguess THEN ST_Distance(feature, centroid)
+                  ELSE min(ST_Distance(feature_centroid, geometry))
+                       -- tie breaker when distance is the same (i.e. way is on boundary)
+                       + 0.00001 * ST_Distance(feature, centroid)
+             END as distance,
              isguess, postcode, centroid
       FROM location_area_large_{{ partition }}
       WHERE geometry && feature
-        AND is_relevant_geometry(ST_Relate(geometry, feature), ST_GeometryType(feature))
+        AND CASE WHEN ST_Dimension(feature) = 0
+                     THEN _ST_Covers(geometry, feature)
+                 WHEN ST_Dimension(feature) = 2
+                     THEN ST_Relate(geometry, feature, 'T********')
+                 ELSE ST_NPoints(ST_Intersection(geometry, feature)) > 1
+            END
         AND rank_address < maxrank
             -- Postcodes currently still use rank_search to define for which
             -- features they are relevant.
@@ -61,55 +58,37 @@ BEGIN
   RAISE EXCEPTION 'Unknown partition %', in_partition;
 END
 $$
-LANGUAGE plpgsql STABLE;
+LANGUAGE plpgsql STABLE PARALLEL SAFE;
 
-CREATE OR REPLACE FUNCTION get_places_for_addr_tags(in_partition SMALLINT,
-                                                    feature GEOMETRY,
-                                                    address HSTORE, country TEXT)
-  RETURNS SETOF nearfeaturecentr
+
+CREATE OR REPLACE FUNCTION get_address_place(in_partition SMALLINT, feature GEOMETRY,
+                                             from_rank SMALLINT, to_rank SMALLINT,
+                                             extent FLOAT, token_info JSONB, key TEXT)
+  RETURNS nearfeaturecentr
   AS $$
 DECLARE
   r nearfeaturecentr%rowtype;
-  item RECORD;
 BEGIN
-  FOR item IN
-    SELECT (get_addr_tag_rank(key, country)).*, key, name FROM
-      (SELECT skeys(address) as key, svals(address) as name) x
-  LOOP
-   IF item.from_rank is null THEN
-     CONTINUE;
-   END IF;
-
 {% for partition in db.partitions %}
-    IF in_partition = {{ partition }} THEN
-        SELECT place_id, keywords, rank_address, rank_search,
-               min(ST_Distance(feature, centroid)) as distance,
-               isguess, postcode, centroid INTO r
+  IF in_partition = {{ partition }} THEN
+      SELECT place_id, keywords, rank_address, rank_search,
+             min(ST_Distance(feature, centroid)) as distance,
+             isguess, postcode, centroid INTO r
         FROM location_area_large_{{ partition }}
-        WHERE geometry && ST_Expand(feature, item.extent)
-          AND rank_address between item.from_rank and item.to_rank
-          AND word_ids_from_name(item.name) && keywords
+        WHERE geometry && ST_Expand(feature, extent)
+              AND rank_address between from_rank and to_rank
+              AND token_matches_address(token_info, key, keywords)
         GROUP BY place_id, keywords, rank_address, rank_search, isguess, postcode, centroid
-        ORDER BY bool_or(ST_Intersects(geometry, feature)), distance LIMIT 1;
-      IF r.place_id is null THEN
-        -- If we cannot find a place for the term, just return the
-        -- search term for the given name. That ensures that the address
-        -- element can still be searched for, even though it will not be
-        -- displayed.
-        RETURN NEXT ROW(null, addr_ids_from_name(item.name), null, null,
-                        null, null, null, null)::nearfeaturecentr;
-      ELSE
-        RETURN NEXT r;
-      END IF;
-      CONTINUE;
-    END IF;
+        ORDER BY bool_or(ST_Intersects(geometry, feature)) DESC, distance LIMIT 1;
+      RETURN r;
+  END IF;
 {% endfor %}
 
-    RAISE EXCEPTION 'Unknown partition %', in_partition;
-  END LOOP;
+  RAISE EXCEPTION 'Unknown partition %', in_partition;
 END;
 $$
-LANGUAGE plpgsql STABLE;
+LANGUAGE plpgsql STABLE PARALLEL SAFE;
+
 
 create or replace function deleteLocationArea(in_partition INTEGER, in_place_id BIGINT, in_rank_search INTEGER) RETURNS BOOLEAN AS $$
 DECLARE
@@ -144,16 +123,20 @@ BEGIN
     RETURN TRUE;
   END IF;
 
-  IF in_rank_search <= 4 and not in_estimate THEN
-    INSERT INTO location_area_country (place_id, country_code, geometry)
-      values (in_place_id, in_country_code, in_geometry);
+  IF in_rank_search <= 4 THEN
+    IF not in_estimate and in_country_code is not NULL THEN
+      INSERT INTO location_area_country (place_id, country_code, geometry)
+        (SELECT in_place_id, in_country_code, geom
+         FROM split_geometry(in_geometry) as geom);
+    END IF;
     RETURN TRUE;
   END IF;
 
 {% for partition in db.partitions %}
   IF in_partition = {{ partition }} THEN
     INSERT INTO location_area_large_{{ partition }} (partition, place_id, country_code, keywords, rank_search, rank_address, isguess, postcode, centroid, geometry)
-      values (in_partition, in_place_id, in_country_code, in_keywords, in_rank_search, in_rank_address, in_estimate, postcode, in_centroid, in_geometry);
+      (SELECT in_partition, in_place_id, in_country_code, in_keywords, in_rank_search, in_rank_address, in_estimate, postcode, in_centroid, geom
+       FROM split_geometry(in_geometry) as geom);
     RETURN TRUE;
   END IF;
 {% endfor %}
@@ -166,21 +149,25 @@ LANGUAGE plpgsql;
 
 CREATE OR REPLACE FUNCTION getNearestNamedRoadPlaceId(in_partition INTEGER,
                                                       point GEOMETRY,
-                                                      isin_token INTEGER[])
+                                                      token_info JSONB)
   RETURNS BIGINT
   AS $$
 DECLARE
   parent BIGINT;
 BEGIN
+  IF not token_has_addr_street(token_info) THEN
+    RETURN NULL;
+  END IF;
 
 {% for partition in db.partitions %}
   IF in_partition = {{ partition }} THEN
-    SELECT place_id FROM search_name_{{ partition }}
+    SELECT CASE WHEN token_matches_street(token_info, name_vector) THEN place_id ELSE NULL END
       INTO parent
-      WHERE name_vector && isin_token
-            AND centroid && ST_Expand(point, 0.015)
+      FROM search_name_{{ partition }}
+      WHERE (token_matches_street(token_info, name_vector)
+             OR ST_Distance(centroid, point) > 0.1)
             AND address_rank between 26 and 27
-      ORDER BY ST_Distance(centroid, point) ASC limit 1;
+      ORDER BY centroid <-> point LIMIT 1;
     RETURN parent;
   END IF;
 {% endfor %}
@@ -188,26 +175,29 @@ BEGIN
   RAISE EXCEPTION 'Unknown partition %', in_partition;
 END
 $$
-LANGUAGE plpgsql STABLE;
+LANGUAGE plpgsql STABLE PARALLEL SAFE;
 
 CREATE OR REPLACE FUNCTION getNearestNamedPlacePlaceId(in_partition INTEGER,
                                                        point GEOMETRY,
-                                                       isin_token INTEGER[])
+                                                       token_info JSONB)
   RETURNS BIGINT
   AS $$
 DECLARE
   parent BIGINT;
 BEGIN
+  IF not token_has_addr_place(token_info) THEN
+    RETURN NULL;
+  END IF;
 
 {% for partition in db.partitions %}
   IF in_partition = {{ partition }} THEN
-    SELECT place_id
+    SELECT CASE WHEN token_matches_place(token_info, name_vector) THEN place_id ELSE NULL END
       INTO parent
       FROM search_name_{{ partition }}
-      WHERE name_vector && isin_token
-            AND centroid && ST_Expand(point, 0.04)
+      WHERE (token_matches_place(token_info, name_vector)
+             OR ST_Distance(centroid, point) > 0.1)
             AND address_rank between 16 and 25
-      ORDER BY ST_Distance(centroid, point) ASC limit 1;
+      ORDER BY centroid <-> point LIMIT 1;
     RETURN parent;
   END IF;
 {% endfor %}
@@ -215,7 +205,7 @@ BEGIN
   RAISE EXCEPTION 'Unknown partition %', in_partition;
 END
 $$
-LANGUAGE plpgsql STABLE;
+LANGUAGE plpgsql STABLE PARALLEL SAFE;
 
 create or replace function insertSearchName(
   in_partition INTEGER, in_place_id BIGINT, in_name_vector INTEGER[],
@@ -225,7 +215,6 @@ DECLARE
 BEGIN
 {% for partition in db.partitions %}
   IF in_partition = {{ partition }} THEN
-    DELETE FROM search_name_{{ partition }} values WHERE place_id = in_place_id;
     IF in_rank_address > 0 THEN
       INSERT INTO search_name_{{ partition }} (place_id, address_rank, name_vector, centroid)
         values (in_place_id, in_rank_address, in_name_vector, in_geometry);
@@ -264,7 +253,6 @@ BEGIN
 
 {% for partition in db.partitions %}
   IF in_partition = {{ partition }} THEN
-    DELETE FROM location_road_{{ partition }} where place_id = in_place_id;
     INSERT INTO location_road_{{ partition }} (partition, place_id, country_code, geometry)
       values (in_partition, in_place_id, in_country_code, in_geometry);
     RETURN TRUE;
@@ -300,21 +288,20 @@ CREATE OR REPLACE FUNCTION getNearestRoadPlaceId(in_partition INTEGER, point GEO
   AS $$
 DECLARE
   r RECORD;
-  search_diameter FLOAT;
 BEGIN
 
 {% for partition in db.partitions %}
   IF in_partition = {{ partition }} THEN
-    search_diameter := 0.00005;
-    WHILE search_diameter < 0.1 LOOP
-      FOR r IN
-        SELECT place_id FROM location_road_{{ partition }}
-          WHERE ST_DWithin(geometry, point, search_diameter)
-          ORDER BY ST_Distance(geometry, point) ASC limit 1
-      LOOP
+    FOR r IN
+      SELECT place_id, ST_Distance(geometry, point) as dist
+        FROM location_road_{{ partition }}
+        ORDER BY geometry <-> point
+        LIMIT 1
+    LOOP
+      IF r.dist < 0.06 THEN
         RETURN r.place_id;
-      END LOOP;
-      search_diameter := search_diameter * 2;
+      END IF;
+      RETURN NULL;
     END LOOP;
     RETURN NULL;
   END IF;
@@ -323,7 +310,7 @@ BEGIN
   RAISE EXCEPTION 'Unknown partition %', in_partition;
 END
 $$
-LANGUAGE plpgsql STABLE;
+LANGUAGE plpgsql STABLE PARALLEL SAFE;
 
 CREATE OR REPLACE FUNCTION getNearestParallelRoadFeature(in_partition INTEGER,
                                                          line GEOMETRY)
@@ -367,4 +354,4 @@ BEGIN
   RAISE EXCEPTION 'Unknown partition %', in_partition;
 END
 $$
-LANGUAGE plpgsql STABLE;
+LANGUAGE plpgsql STABLE PARALLEL SAFE;

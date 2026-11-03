@@ -1,8 +1,5 @@
-### Nominatim API
-
-Nominatim indexes named (or numbered) features within the OpenStreetMap (OSM) dataset and a subset of other unnamed features (pubs, hotels, churches, etc).
-
-Its API has the following endpoints for querying the data:
+This section describes the API V1 of the Nominatim web service. The
+service offers the following endpoints:
 
  * __[/search](Search.md)__ - search OSM objects by name or type
  * __[/reverse](Reverse.md)__ - search OSM object by their location
@@ -12,3 +9,6 @@ Its API has the following endpoints for querying the data:
                     back in Nominatim in case the deletion was accidental
  * __/polygons__ - list of broken polygons detected by Nominatim
  * __[/details](Details.md)__ - show internal details for an object (for debugging only)
+
+
+

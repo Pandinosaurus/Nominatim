@@ -1,3 +1,10 @@
+-- SPDX-License-Identifier: GPL-2.0-only
+--
+-- This file is part of Nominatim. (https://nominatim.org)
+--
+-- Copyright (C) 2026 by the Nominatim developer community.
+-- For a full list of authors see the git log.
+
 -- insert creates the location tables, creates location indexes if indexed == true
 CREATE TRIGGER placex_before_insert BEFORE INSERT ON placex
     FOR EACH ROW EXECUTE PROCEDURE placex_insert();
@@ -18,5 +25,20 @@ CREATE TRIGGER place_before_delete BEFORE DELETE ON place
 CREATE TRIGGER place_before_insert BEFORE INSERT ON place
     FOR EACH ROW EXECUTE PROCEDURE place_insert();
 
-CREATE TRIGGER location_postcode_before_update BEFORE UPDATE ON location_postcode
-    FOR EACH ROW EXECUTE PROCEDURE postcode_update();
+CREATE TRIGGER location_postcode_before_update BEFORE UPDATE ON location_postcodes
+    FOR EACH ROW EXECUTE PROCEDURE postcodes_update();
+CREATE TRIGGER location_postcodes_before_delete BEFORE DELETE ON location_postcodes
+    FOR EACH ROW EXECUTE PROCEDURE postcodes_delete();
+CREATE TRIGGER location_postcodes_before_insert BEFORE INSERT ON location_postcodes
+    FOR EACH ROW EXECUTE PROCEDURE postcodes_insert();
+
+CREATE TRIGGER place_interpolation_before_insert BEFORE INSERT ON place_interpolation
+    FOR EACH ROW EXECUTE PROCEDURE place_interpolation_insert();
+CREATE TRIGGER place_interpolation_before_delete BEFORE DELETE ON place_interpolation
+    FOR EACH ROW EXECUTE PROCEDURE place_interpolation_delete();
+
+-- Propagate changes to associatedStreet relations to house members
+-- so that the indexer re-computes their parent_place_id.
+CREATE TRIGGER place_associated_street_update
+    AFTER INSERT OR DELETE ON place_associated_street
+    FOR EACH ROW EXECUTE FUNCTION invalidate_associated_street_members();

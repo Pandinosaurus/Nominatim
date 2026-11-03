@@ -12,7 +12,7 @@ a single place (for reverse) of the following format:
 
 ```
   {
-    "place_id": "100149",
+    "place_id": 100149,
     "licence": "Data © OpenStreetMap contributors, ODbL 1.0. https://osm.org/copyright",
     "osm_type": "node",
     "osm_id": "107775",
@@ -28,6 +28,7 @@ a single place (for reverse) of the following format:
       "city": "London",
       "state_district": "Greater London",
       "state": "England",
+      "ISO3166-2-lvl4": "GB-ENG",
       "postcode": "SW1A 2DU",
       "country": "United Kingdom",
       "country_code": "gb"
@@ -59,6 +60,8 @@ The possible fields are:
  * `namedetails` - dictionary with full list of available names including ref etc.
  * `geojson`, `svg`, `geotext`, `geokml` - full geometry
    (only with the appropriate `polygon_*` parameter)
+ * `entrances` - array of objects representing tagged entrances for the object, or
+   null if none are found (only with `entrances=1`)
 
 ## JSONv2
 
@@ -86,6 +89,8 @@ The properties object has the following fields:
  * `extratags` - dictionary with additional useful tags like `website` or `maxspeed`
    (only with `extratags=1`)
  * `namedetails` - dictionary with full list of available names including ref etc.
+ * `entrances` - array of objects representing tagged entrances for the object, or
+   null if none are found (only with `entrances=1`)
 
 Use `polygon_geojson` to output the full geometry of the object instead
 of the centroid.
@@ -97,13 +102,21 @@ The GeocodeJSON format follows the
 The following feature attributes are implemented:
 
  * `osm_type`, `osm_id` - reference to the OSM object (unofficial extension, [see notes](#osm-reference))
- * `type` - value of the main tag of the object (e.g. residential, restaurant, ...)
+ * `type` - the 'address level' of the object ('house', 'street', `district`, `city`,
+            `county`, `state`, `country`, `locality`)
+ * `osm_key`- key of the main tag of the OSM object (e.g. boundary, highway, amenity)
+ * `osm_value` - value of the main tag of the OSM object (e.g. residential, restaurant)
  * `label` - full comma-separated address
  * `name` - localised name of the place
  * `housenumber`, `street`, `locality`, `district`, `postcode`, `city`,
    `county`, `state`, `country` -
-   provided when it can be determined from the address
+   provided when it can be determined from the address (only with `addressdetails=1`)
  * `admin` - list of localised names of administrative boundaries (only with `addressdetails=1`)
+ * `extra` - dictionary with additional useful tags like `website` or `maxspeed`
+   (only with `extratags=1`)
+ * `entrances` - array of objects representing tagged entrances for the object, or
+   null if none are found (only with `entrances=1`)
+
 
 Use `polygon_geojson` to output the full geometry of the object instead
 of the centroid.
@@ -126,6 +139,7 @@ formats depending on the API call.
   </result>
   <addressparts>
      <state>Bavaria</state>
+     <ISO3166-2-lvl4>DE-BY</ISO3166-2-lvl4>
      <country>Germany</country>
      <country_code>de</country_code>
   </addressparts>
@@ -154,16 +168,16 @@ The place information can be found in the `result` element. The attributes of th
 The full address of the result can be found in the content of the
 `result` element as a comma-separated list.
 
-Additional information requested with `addressdetails=1`, `extratags=1` and
-`namedetails=1` can be found in extra elements.
+Additional information requested with `addressdetails=1`, `extratags=1`,
+`namedetails=1`, and `entrances=1` can be found in extra elements.
 
 ### Search and Lookup
 
 ```
 <searchresults timestamp="Sat, 11 Aug 18 11:55:35 +0000"
                attribution="Data © OpenStreetMap contributors, ODbL 1.0. https://www.openstreetmap.org/copyright"
-               querystring="london" polygon="false" exclude_place_ids="100149"
-               more_url="https://nominatim.openstreetmap.org/search.php?q=london&addressdetails=1&extratags=1&exclude_place_ids=100149&format=xml&accept-language=en-US%2Cen%3Bq%3D0.7%2Cde%3Bq%3D0.3">
+               querystring="london" polygon="false" exclude_place_ids="N107775"
+               more_url="https://nominatim.openstreetmap.org/search?q=london&addressdetails=1&extratags=1&exclude_place_ids=N107775&format=xml&accept-language=en-US%2Cen%3Bq%3D0.7%2Cde%3Bq%3D0.3">
   <place place_id="100149" osm_type="node" osm_id="107775" place_rank="15" address_rank="15"
          boundingbox="51.3473219,51.6673219,-0.2876474,0.0323526" lat="51.5073219" lon="-0.1276474"
          display_name="London, Greater London, England, SW1A 2DU, United Kingdom"
@@ -179,6 +193,7 @@ Additional information requested with `addressdetails=1`, `extratags=1` and
     <city>London</city>
     <state_district>Greater London</state_district>
     <state>England</state>
+    <ISO3166-2-lvl4>GB-ENG</ISO3166-2-lvl4>
     <postcode>SW1A 2DU</postcode>
     <country>United Kingdom</country>
     <country_code>gb</country_code>
@@ -193,7 +208,7 @@ generic information about the query:
  * `attribution` - OSM licensing information
  * `querystring` - original query
  * `polygon` - true when extra geometry information was requested
- * `exclude_place_ids` - IDs of places that should be ignored in a follow-up request
+ * `exclude_place_ids` - IDs of places that should be ignored in a follow-up request (OSM IDs where possible, otherwise `place_id`s)
  * `more_url` - search call that will yield additional results for the query
    just sent
 
@@ -205,8 +220,8 @@ be more than one. The attributes of that element contain:
  * `ref` - content of `ref` tag if it exists
  * `lat`, `lon` - latitude and longitude of the centroid of the object
  * `boundingbox` - comma-separated list of corner coordinates ([see notes](#boundingbox))
- * `place_rank` - class [search rank](../develop/Ranking#search-rank)
- * `address_rank` - place [address rank](../develop/Ranking#address-rank)
+ * `place_rank` - class [search rank](../customize/Ranking.md#search-rank)
+ * `address_rank` - place [address rank](../customize/Ranking.md#address-rank)
  * `display_name` - full comma-separated address
  * `class`, `type` - key and value of the main OSM tag
  * `importance` - computed importance rank
@@ -215,9 +230,25 @@ be more than one. The attributes of that element contain:
 When `addressdetails=1` is requested, the localised address parts appear
 as subelements with the type of the address part.
 
-Additional information requested with `extratags=1` and `namedetails=1` can
-be found in extra elements as sub-element of `extratags` and `namedetails`
-respectively.
+Additional information requested with `extratags=1`, `namedetails=1`, and
+`entrances=1` can be found in extra elements as sub-element of `extratags`,
+`namedetails`, and `entrances` respectively.
+
+
+## Debug output
+
+| Parameter | Value  | Default |
+|-----------| -----  | ------- |
+| debug     | 0 or 1 | 0       |
+
+Adding `debug=1` to a query to the [/search](Search.md), [/reverse](Reverse.md),
+[/lookup](Lookup.md) or [/details](Details.md) endpoint switches the output to
+an HTML page with assorted developer debug information: how Nominatim parsed,
+understood and executed its database searches.
+
+Debug output is disabled by default. It is only available when the server
+administrator has enabled
+[`NOMINATIM_SERVE_DEBUG_OUTPUT`](../customize/Settings.md#nominatim_serve_debug_output).
 
 
 ## Notes on field values
@@ -230,7 +261,7 @@ on another server. It may even change its ID on the same server when it is
 removed and reimported while updating the database with fresh OSM data.
 It is thus not useful to treat it as permanent for later use.
 
-The combination `osm_type`+`osm_id` is slighly better but remember in
+The combination `osm_type`+`osm_id` is slightly better but remember in
 OpenStreetMap mappers can delete, split, recreate places (and those
 get a new `osm_id`), there is no link between those old and new ids.
 Places can also change their meaning without changing their `osm_id`,
@@ -279,17 +310,93 @@ with a designation label. Per default the following labels may appear:
 
  * continent
  * country, country_code
- * region, state, state_district, county
+ * region, state, state_district, county, ISO3166-2-lvl<admin_level>
  * municipality, city, town, village
  * city_district, district, borough, suburb, subdivision
  * hamlet, croft, isolated_dwelling
  * neighbourhood, allotments, quarter
- * city_block, residental, farm, farmyard, industrial, commercial, retail
+ * city_block, residential, farm, farmyard, industrial, commercial, retail
  * road
  * house_number, house_name
  * emergency, historic, military, natural, landuse, place, railway,
    man_made, aerialway, boundary, amenity, aeroway, club, craft, leisure,
    office, mountain_pass, shop, tourism, bridge, tunnel, waterway
+ * postcode
 
 They roughly correspond to the classification of the OpenStreetMap data
 according to either the `place` tag or the main key of the object.
+
+### entrances
+
+Entrance details in the xml and json formats return the latitude and longitude
+of the entrance, the osm node ID, the [type of
+entrance](https://wiki.openstreetmap.org/wiki/Key:entrance), and any extra tags
+associated with the entrance node.
+
+ * osm_id
+ * type
+ * lat
+ * lon
+ * extratags
+
+They roughly correspond to the classification of the OpenStreetMap data
+according to either the `place` tag or the main key of the object.
+
+#### Example
+
+##### JSON
+
+[https://nominatim.openstreetmap.org/details?osmtype=W&osmid=32619803&entrances=1&format=json](https://nominatim.openstreetmap.org/details?osmtype=W&osmid=32619803&entrances=1&format=json)
+
+
+```json
+{
+  "place_id": 124325848,
+  "parent_place_id": 123936289,
+  "osm_type": "W",
+  "osm_id": 32619803,
+  "category": "shop",
+  "type": "supermarket",
+  "admin_level": 15,
+  "localname": "PENNY",
+  ...
+  "entrances": [
+    {
+      "osm_id": 1733488238,
+      "type": "yes",
+      "lat": "51.0466704",
+      "lon": "12.8077106",
+      "extratags": {
+        "foot": "yes"
+      }
+    },
+    {
+      "osm_id": 1733488256,
+      "type": "main",
+      "lat": "51.0467197",
+      "lon": "12.8078448",
+      "extratags": {
+        "foot": "yes"
+      }
+    },
+    {
+      "osm_id": 1733498087,
+      "type": "exit",
+      "lat": "51.0467081",
+      "lon": "12.8078131",
+      "extratags": {
+        "foot": "yes"
+      }
+    },
+    {
+      "osm_id": 7914950851,
+      "type": "service",
+      "lat": "51.0468487",
+      "lon": "12.8075876",
+      "extratags": {
+        "access": "delivery"
+      }
+    }
+  ]
+}
+```

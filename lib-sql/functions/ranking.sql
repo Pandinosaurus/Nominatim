@@ -1,4 +1,77 @@
+-- SPDX-License-Identifier: GPL-2.0-only
+--
+-- This file is part of Nominatim. (https://nominatim.org)
+--
+-- Copyright (C) 2026 by the Nominatim developer community.
+-- For a full list of authors see the git log.
+
 -- Functions related to search and address ranks
+
+-- Function for removing the categories that shouldn't be taken into account while ranking.
+-- Categories outside the osm.* tree are always kept.
+CREATE OR REPLACE FUNCTION drop_unwanted_categories(categories ltree[], osm_type TEXT,
+                                                    admin_level SMALLINT, name HSTORE,
+                                                    extratags HSTORE, is_area BOOLEAN)
+  RETURNS ltree[]
+  AS $$
+DECLARE
+  cat ltree;
+  cat_class TEXT;
+  result ltree[] := ARRAY[]::ltree[];
+BEGIN
+  IF categories IS NULL THEN
+    RETURN NULL;
+  END IF;
+
+  FOREACH cat IN ARRAY categories LOOP
+    IF cat::TEXT LIKE 'osm.%' THEN
+      cat_class := subpath(cat, 1, 1)::TEXT;
+
+      -- Check unnamed highway area
+      IF cat_class = 'highway'
+        AND is_area AND name IS NULL
+        AND extratags IS NOT NULL AND extratags ? 'area'
+        AND extratags->'area' = 'yes'
+      THEN
+        CONTINUE;
+      END IF;
+
+      -- Check non-area boundary
+      IF cat_class = 'boundary' THEN
+        IF NOT is_area OR (admin_level <= 4 AND osm_type = 'W')
+        THEN
+          CONTINUE;
+        END IF;
+      END IF;
+    END IF;
+
+    result := array_append(result, cat);
+  END LOOP;
+
+  RETURN result;
+END;
+$$
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE;
+
+-- Check if a place is rankable at all.
+-- These really should be dropped at the lua level eventually.
+CREATE OR REPLACE FUNCTION is_rankable_place(osm_type TEXT, categories ltree[],
+                                             admin_level SMALLINT, name HSTORE,
+                                             extratags HSTORE, is_area BOOLEAN)
+  RETURNS BOOLEAN
+  AS $$
+BEGIN
+  IF categories IS NULL THEN
+    RETURN TRUE;
+  END IF;
+  RETURN array_length(drop_unwanted_categories(categories, osm_type, admin_level,
+                      name, extratags, is_area), 1)
+                      IS NOT NULL;
+END;
+$$
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE;
+
+
 
 -- Return an approximate search radius according to the search rank.
 CREATE OR REPLACE FUNCTION reverse_place_diameter(rank_search SMALLINT)
@@ -22,7 +95,7 @@ BEGIN
   RETURN 0.02;
 END;
 $$
-LANGUAGE plpgsql IMMUTABLE;
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE;
 
 
 -- Return an approximate update radius according to the search rank.
@@ -45,15 +118,15 @@ BEGIN
   ELSIF rank_search < 24 THEN
     RETURN 0.02;
   ELSIF rank_search < 26 THEN
-    RETURN 0.002;
+    RETURN 0.005;
   ELSIF rank_search < 28 THEN
-    RETURN 0.001;
+    RETURN 0.002;
   END IF;
 
   RETURN 0;
 END;
 $$
-LANGUAGE plpgsql IMMUTABLE;
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE;
 
 -- Compute a base address rank from the extent of the given geometry.
 --
@@ -81,6 +154,10 @@ BEGIN
     area := area / 3;
   ELSIF country_code IN ('bo', 'ar', 'sd', 'mn', 'in', 'et', 'cd', 'mz', 'ly', 'cl', 'zm') THEN
     area := area / 2;
+  ELSIF country_code IN ('sg', 'ws', 'st', 'kn') THEN
+    area := area * 5;
+  ELSIF country_code IN ('dm', 'mt', 'lc', 'gg', 'sc', 'nr') THEN
+    area := area * 20;
   END IF;
 
   IF area > 1 THEN
@@ -100,75 +177,17 @@ BEGIN
    RETURN 23;
 END;
 $$
-LANGUAGE plpgsql IMMUTABLE;
-
-
--- Guess a ranking for postcodes from country and postcode format.
-CREATE OR REPLACE FUNCTION get_postcode_rank(country_code VARCHAR(2), postcode TEXT,
-                                             OUT rank_search SMALLINT,
-                                             OUT rank_address SMALLINT)
-AS $$
-DECLARE
-  part TEXT;
-BEGIN
-    rank_search := 30;
-    rank_address := 30;
-    postcode := upper(postcode);
-
-    IF country_code = 'gb' THEN
-        IF postcode ~ '^([A-Z][A-Z]?[0-9][0-9A-Z]? [0-9][A-Z][A-Z])$' THEN
-            rank_search := 25;
-            rank_address := 5;
-        ELSEIF postcode ~ '^([A-Z][A-Z]?[0-9][0-9A-Z]? [0-9])$' THEN
-            rank_search := 23;
-            rank_address := 5;
-        ELSEIF postcode ~ '^([A-Z][A-Z]?[0-9][0-9A-Z])$' THEN
-            rank_search := 21;
-            rank_address := 5;
-        END IF;
-
-    ELSEIF country_code = 'sg' THEN
-        IF postcode ~ '^([0-9]{6})$' THEN
-            rank_search := 25;
-            rank_address := 11;
-        END IF;
-
-    ELSEIF country_code = 'de' THEN
-        IF postcode ~ '^([0-9]{5})$' THEN
-            rank_search := 21;
-            rank_address := 11;
-        END IF;
-
-    ELSE
-        -- Guess at the postcode format and coverage (!)
-        IF postcode ~ '^[A-Z0-9]{1,5}$' THEN -- Probably too short to be very local
-            rank_search := 21;
-            rank_address := 11;
-        ELSE
-            -- Does it look splitable into and area and local code?
-            part := substring(postcode from '^([- :A-Z0-9]+)([- :][A-Z0-9]+)$');
-
-            IF part IS NOT NULL THEN
-                rank_search := 25;
-                rank_address := 11;
-            ELSEIF postcode ~ '^[- :A-Z0-9]{6,}$' THEN
-                rank_search := 21;
-                rank_address := 11;
-            END IF;
-        END IF;
-    END IF;
-
-END;
-$$
-LANGUAGE plpgsql IMMUTABLE;
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE;
 
 
 -- Get standard search and address rank for an object.
+-- Iterates all osm.* categories and finds the one with the lowest positive
+-- address rank. Address rank of 0 has the lowest priority. Ties broken by
+-- lower search rank.
 --
 -- \param country        Two-letter country code where the object is in.
 -- \param extended_type  OSM type (N, W, R) or area type (A).
--- \param place_class    Class (or tag key) of object.
--- \param place_type     Type (or tag value) of object.
+-- \param categories     ltree[] of osm.<class>.<type> categories.
 -- \param admin_level    Value of admin_level tag.
 -- \param is_major       If true, boost search rank by one.
 -- \param postcode       Value of addr:postcode tag.
@@ -177,7 +196,7 @@ LANGUAGE plpgsql IMMUTABLE;
 --
 CREATE OR REPLACE FUNCTION compute_place_rank(country VARCHAR(2),
                                               extended_type VARCHAR(1),
-                                              place_class TEXT, place_type TEXT,
+                                              categories ltree[],
                                               admin_level SMALLINT,
                                               is_major BOOLEAN,
                                               postcode TEXT,
@@ -185,51 +204,98 @@ CREATE OR REPLACE FUNCTION compute_place_rank(country VARCHAR(2),
                                               OUT address_rank SMALLINT)
 AS $$
 DECLARE
+  cat ltree;
+  cat_class TEXT;
+  cat_type TEXT;
   classtype TEXT;
+  best_search SMALLINT := 99;
+  best_address SMALLINT := 99;
+  cand_search SMALLINT;
+  cand_address SMALLINT;
+  has_boundary_admin BOOLEAN;
 BEGIN
-  IF place_class in ('place','boundary')
-     and place_type in ('postcode','postal_code')
-  THEN
-    SELECT * INTO search_rank, address_rank
-      FROM get_postcode_rank(country, postcode);
-  ELSEIF extended_type = 'N' AND place_class = 'highway' THEN
-    search_rank = 30;
-    address_rank = 30;
-  ELSEIF place_class = 'landuse' AND extended_type != 'A' THEN
-    search_rank = 30;
-    address_rank = 30;
-  ELSE
-    IF place_class = 'boundary' and place_type = 'administrative' THEN
-      classtype = place_type || admin_level::TEXT;
-    ELSE
-      classtype = place_type;
-    END IF;
-
-    SELECT l.rank_search, l.rank_address INTO search_rank, address_rank
-      FROM address_levels l
-     WHERE (l.country_code = country or l.country_code is NULL)
-           AND l.class = place_class AND (l.type = classtype or l.type is NULL)
-     ORDER BY l.country_code, l.class, l.type LIMIT 1;
-
-    IF search_rank is NULL OR address_rank is NULL THEN
-      search_rank := 30;
-      address_rank := 30;
-    END IF;
-
-    -- some postcorrections
-    IF place_class = 'waterway' AND extended_type = 'R' THEN
-        -- Slightly promote waterway relations so that they are processed
-        -- before their members.
-        search_rank := search_rank - 1;
-    END IF;
-
-    IF is_major THEN
-      search_rank := search_rank - 1;
-    END IF;
+  IF categories IS NULL THEN
+    search_rank := 30;
+    address_rank := 30;
+    RETURN;
   END IF;
+
+  -- Hoist: skip place categories when boundary/administrative is also present.
+  has_boundary_admin := categories <@ 'osm.boundary.administrative';
+
+  FOREACH cat IN ARRAY categories LOOP
+    -- Only consider osm.* categories
+    IF NOT (cat ~ 'osm.*'::lquery) THEN
+      CONTINUE;
+    END IF;
+
+    -- Place ranks are handled by the post-hoc adjustment in placex_update.
+    IF has_boundary_admin AND cat ~ 'osm.place.*'::lquery THEN
+      CONTINUE;
+    END IF;
+
+    cat_class := split_part(cat::text, '.', 2);
+    cat_type := split_part(cat::text, '.', 3);
+    -- Short-circuits for special cases
+    IF extended_type = 'N' AND cat_class = 'highway' THEN
+      cand_search := 30;
+      cand_address := 30;
+    ELSIF cat_class = 'landuse' AND extended_type != 'A' THEN
+      cand_search := 30;
+      cand_address := 30;
+    ELSE
+      -- Build classtype for boundary/administrative
+      IF cat_class = 'boundary' AND cat_type = 'administrative' THEN
+        classtype := cat_type || admin_level::TEXT;
+      ELSE
+        classtype := cat_type;
+      END IF;
+
+      SELECT l.rank_search, l.rank_address INTO cand_search, cand_address
+        FROM address_levels l
+       WHERE (l.country_code = country OR l.country_code IS NULL)
+             AND l.class = cat_class AND (l.type = classtype OR l.type IS NULL)
+       ORDER BY l.country_code, l.class, l.type LIMIT 1;
+
+      IF cand_search IS NULL OR cand_address IS NULL THEN
+        cand_search := 30;
+        cand_address := 30;
+      END IF;
+
+      -- Waterway relation boost
+      IF cat_class = 'waterway' AND extended_type = 'R' THEN
+        cand_search := cand_search - 1;
+      END IF;
+    END IF;
+
+    -- Selection: pick the candidate with lowest positive address rank.
+    -- Address rank of 0 has lowest priority (fallback only). Tiebreak: lower search rank.
+    -- A positive address rank always overrides a zero-address fallback (best_address = 0).
+    IF cand_address > 0 AND (best_address = 0 OR cand_address < best_address) THEN
+      best_search := cand_search;
+      best_address := cand_address;
+    ELSIF cand_address > 0 AND cand_address = best_address
+          AND cand_search < best_search THEN
+      best_search := cand_search;
+      best_address := cand_address;
+    ELSIF cand_address = 0 AND (best_address = 99 OR best_address = 0)
+          AND cand_search < best_search THEN
+      -- Fallback: when no addressable category found, pick best search rank
+      best_search := cand_search;
+      best_address := cand_address;
+    END IF;
+  END LOOP;
+
+  -- Apply is_major boost to the winner
+  IF is_major THEN
+    best_search := best_search - 1;
+  END IF;
+
+  search_rank := best_search;
+  address_rank := best_address;
 END;
 $$
-LANGUAGE plpgsql IMMUTABLE;
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE;
 
 CREATE OR REPLACE FUNCTION get_addr_tag_rank(key TEXT, country TEXT,
                                              OUT from_rank SMALLINT,
@@ -276,4 +342,25 @@ BEGIN
   END LOOP;
 END;
 $$
-LANGUAGE plpgsql IMMUTABLE;
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE;
+
+
+CREATE OR REPLACE FUNCTION weigh_search(search_vector INT[],
+                                        rankings TEXT,
+                                        def_weight FLOAT)
+  RETURNS FLOAT
+  AS $$
+DECLARE
+  rank JSON;
+BEGIN
+  FOR rank IN
+    SELECT * FROM json_array_elements(rankings::JSON)
+  LOOP
+    IF true = ALL(SELECT x::int = ANY(search_vector) FROM json_array_elements_text(rank->1) as x) THEN
+      RETURN (rank->>0)::float;
+    END IF;
+  END LOOP;
+  RETURN def_weight;
+END;
+$$
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE;

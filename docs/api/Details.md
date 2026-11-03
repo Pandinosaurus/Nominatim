@@ -2,15 +2,19 @@
 
 Show all details about a single place saved in the database.
 
+This API endpoint is meant for visual inspection of the data in the database,
+mainly together with [Nominatim-UI](https://github.com/osm-search/nominatim-ui/).
+The parameters of the endpoint and the output may change occasionally between
+versions of Nominatim. Do not rely on the output in scripts or applications.
+
 !!! warning
-    The details page exists for debugging only. You may not use it in scripts
-    or to automatically query details about a result.
+    The details endpoint at https://nominatim.openstreetmap.org
+    may not used in scripts or bots at all.
     See [Nominatim Usage Policy](https://operations.osmfoundation.org/policies/nominatim/).
 
 
-## Parameters
 
-The details API supports the following two request formats:
+The details API supports the following three request formats:
 
 ``` xml
 https://nominatim.openstreetmap.org/details?osmtype=[N|W|R]&osmid=<value>&class=<value>
@@ -18,13 +22,15 @@ https://nominatim.openstreetmap.org/details?osmtype=[N|W|R]&osmid=<value>&class=
 
 `osmtype` and `osmid` are required parameters. The type is one of node (N), way (W)
 or relation (R). The id must be a number. The `class` parameter is optional and
-allows to distinguish between entries, when the corresponding OSM object has more
-than one main tag. For example, when a place is tagged with `tourism=hotel` and
-`amenity=restaurant`, there will be two place entries in Nominatim, one for a
-restaurant, one for a hotel. You need to specify `class=tourism` or `class=amentity`
-to get exactly the one you want. If there are multiple places in the database
-but the `class` parameter is left out, then one of the places will be chosen
-at random and displayed.
+only kept for backwards compatibility. An OSM object has a single entry in
+Nominatim, even when it is tagged with more than one main tag. A place tagged
+with `tourism=hotel` and `amenity=restaurant` is therefore returned as one
+result, classified as a restaurant. When `class` is given, then it must be
+equal to the class of that entry or the lookup returns no result.
+
+Databases that were migrated from a version before 5.4 may still hold one entry
+per main tag. There the `class` parameter selects between them and, when it is
+left out, one of the entries is chosen at random and displayed.
 
 ``` xml
 https://nominatim.openstreetmap.org/details?place_id=<value>
@@ -35,66 +41,115 @@ for a place is different between Nominatim installation (servers) and
 changes when data gets reimported. Therefore it cannot be used as
 a permanent id and shouldn't be used in bug reports.
 
+``` xml
+https://nominatim.openstreetmap.org/details?postcode=<country_code>:<postcode_id>
+```
 
-Additional optional parameters are explained below.
+Artificial postcodes do not always have an OSM object reference. For these,
+Nominatim provides a stable postcode reference that combines the country code
+and postcode. Spaces in the postcode id are replaced with underscores. For
+example, `us:94110` refers to postcode `94110` in the United States and
+`gb:EH4_7EA` refers to postcode `EH4 7EA` in Great Britain.
+
+!!! danger "Deprecation warning"
+    The API can also be used with the URL
+    `https://nominatim.openstreetmap.org/details.php`. This is now deprecated
+    and will be removed in future versions.
+
+
+## Parameters
+
+This section lists additional optional parameters.
 
 ### Output format
 
-* `json_callback=<string>`
+| Parameter | Value | Default |
+|-----------| ----- | ------- |
+| json_callback | function name | _unset_ |
 
-Wrap JSON output in a callback function (JSONP) i.e. `<string>(<json>)`.
-
-* `pretty=[0|1]`
-
-Add indentation to make it more human-readable. (Default: 0)
-
+When set, then JSON output will be wrapped in a callback function with
+the given name. See [JSONP](https://en.wikipedia.org/wiki/JSONP) for more
+information.
 
 ### Output details
 
-* `addressdetails=[0|1]`
+| Parameter | Value | Default |
+|-----------| ----- | ------- |
+| addressdetails | 0 or 1 | 0 |
 
-Include a breakdown of the address into elements. (Default: 0)
+When set to 1, include a breakdown of the address into elements.
 
-* `keywords=[0|1]`
+| Parameter | Value | Default |
+|-----------| ----- | ------- |
+| keywords  | 0 or 1 | 0 |
 
-Include a list of name keywords and address keywords (word ids). (Default: 0)
+When set to 1, include a list of name keywords and address keywords
+in the result.
 
-* `linkedplaces=[0|1]`
+| Parameter | Value | Default |
+|-----------| ----- | ------- |
+| linkedplaces  | 0 or 1 | 1 |
 
-Include a details of places that are linked with this one. Places get linked
+Include details of places that are linked with this one. Places get linked
 together when they are different forms of the same physical object. Nominatim
 links two kinds of objects together: place nodes get linked with the
 corresponding administrative boundaries. Waterway relations get linked together with their
 members.
-(Default: 1)
 
-* `hierarchy=[0|1]`
+| Parameter | Value | Default |
+|-----------| ----- | ------- |
+| hierarchy  | 0 or 1 | 0 |
 
-Include details of places lower in the address hierarchy. (Default: 0)
+Include details of POIs and address that depend on the place. Only POIs
+that use this place to determine their address will be returned.
 
-* `group_hierarchy=[0|1]`
+| Parameter | Value | Default |
+|-----------| ----- | ------- |
+| group_hierarchy  | 0 or 1 | 0 |
 
-For JSON output will group the places by type. (Default: 0)
+When set to 1, the output of the address hierarchy will be
+grouped by type.
 
-* `polygon_geojson=[0|1]`
+| Parameter | Value  | Default |
+|-----------| -----  | ------- |
+| polygon_geojson | 0 or 1 | 0 |
 
-Include geometry of result. (Default: 0)
+
+Include geometry of result.
+
+| Parameter | Value | Default |
+|-----------| ----- | ------- |
+| entrances | 0 or 1 | 0 |
+
+When set to 1, include the tagged entrances in the result.
+
 
 ### Language of results
 
-* `accept-language=<browser language string>`
+| Parameter | Value | Default |
+|-----------| ----- | ------- |
+| accept-language | browser language string | content of "Accept-Language" HTTP header |
 
-Preferred language order for showing result, overrides the value
-specified in the "Accept-Language" HTTP header.
-Either use a standard RFC2616 accept-language string or a simple
-comma-separated list of language codes.
+Preferred language order for showing search results. This may either be
+a simple comma-separated list of language codes or have the same format
+as the ["Accept-Language" HTTP header](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Accept-Language).
+
+
+### Other
+
+| Parameter | Value  | Default |
+|-----------| -----  | ------- |
+| debug     | 0 or 1 | 0       |
+
+Output special developer debug information instead of the normal result.
+See [Debug output](Output.md#debug-output) for details.
 
 
 ## Examples
 
 ##### JSON
 
-[https://nominatim.openstreetmap.org/details.php?osmtype=W&osmid=38210407&format=json](https://nominatim.openstreetmap.org/details.php?osmtype=W&osmid=38210407&format=json)
+[https://nominatim.openstreetmap.org/details?osmtype=W&osmid=38210407&format=json](https://nominatim.openstreetmap.org/details?osmtype=W&osmid=38210407&format=json)
 
 
 ```json

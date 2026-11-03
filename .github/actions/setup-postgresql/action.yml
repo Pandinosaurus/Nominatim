@@ -1,11 +1,10 @@
 name: 'Setup Postgresql and Postgis'
 
+description: 'Installs PostgreSQL and PostGIS and configures it for CI tests'
+
 inputs:
     postgresql-version:
         description: 'Version of PostgreSQL to install'
-        required: true
-    postgis-version:
-        description: 'Version of Postgis to install'
         required: true
 
 runs:
@@ -14,19 +13,18 @@ runs:
     steps:
         - name: Remove existing PostgreSQL
           run: |
+              sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
               sudo apt-get purge -yq postgresql*
-              sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
               sudo apt-get update -qq
 
           shell: bash
 
         - name: Install PostgreSQL
           run: |
-              sudo apt-get install -y -qq --no-install-suggests --no-install-recommends postgresql-client-${PGVER} postgresql-${PGVER}-postgis-${POSTGISVER} postgresql-${PGVER}-postgis-${POSTGISVER}-scripts postgresql-contrib-${PGVER} postgresql-${PGVER} postgresql-server-dev-${PGVER}
+              sudo apt-get install -y -qq --no-install-suggests --no-install-recommends postgresql-client-${PGVER} postgresql-${PGVER}-postgis-3 postgresql-${PGVER}-postgis-3-scripts postgresql-contrib-${PGVER} postgresql-${PGVER}
           shell: bash
           env:
               PGVER: ${{ inputs.postgresql-version }}
-              POSTGISVER: ${{ inputs.postgis-version }}
 
         - name: Adapt postgresql configuration
           run: |

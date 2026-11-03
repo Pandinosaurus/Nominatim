@@ -1,17 +1,41 @@
+-- SPDX-License-Identifier: GPL-2.0-only
+--
+-- This file is part of Nominatim. (https://nominatim.org)
+--
+-- Copyright (C) 2026 by the Nominatim developer community.
+-- For a full list of authors see the git log.
+
 -- Assorted helper functions for the triggers.
 
-CREATE OR REPLACE FUNCTION geometry_sector(partition INTEGER, place geometry)
-  RETURNS INTEGER
+CREATE OR REPLACE FUNCTION get_center_point(place GEOMETRY)
+  RETURNS GEOMETRY
   AS $$
 DECLARE
-  NEWgeometry geometry;
+  geom_type TEXT;
 BEGIN
---  RAISE WARNING '%',place;
-  NEWgeometry := ST_PointOnSurface(place);
-  RETURN (partition*1000000) + (500-ST_X(NEWgeometry)::integer)*1000 + (500-ST_Y(NEWgeometry)::integer);
+  geom_type := ST_GeometryType(place);
+  IF geom_type = 'ST_Point' THEN
+    RETURN place;
+  END IF;
+  IF geom_type = 'ST_LineString' THEN
+    RETURN ST_ReducePrecision(ST_LineInterpolatePoint(place, 0.5), 0.0000001);
+  END IF;
+
+  RETURN ST_ReducePrecision(ST_PointOnSurface(place), 0.0000001);
 END;
 $$
-LANGUAGE plpgsql IMMUTABLE;
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE;
+
+
+CREATE OR REPLACE FUNCTION geometry_sector(partition INTEGER, place GEOMETRY)
+  RETURNS INTEGER
+  AS $$
+BEGIN
+  RETURN (partition*1000000) + (500-ST_X(place)::INTEGER)*1000 + (500-ST_Y(place)::INTEGER);
+END;
+$$
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE;
+
 
 
 CREATE OR REPLACE FUNCTION array_merge(a INTEGER[], b INTEGER[])
@@ -22,13 +46,13 @@ DECLARE
   r INTEGER[];
 BEGIN
   IF array_upper(a, 1) IS NULL THEN
-    RETURN b;
+    RETURN COALESCE(b, '{}'::INTEGER[]);
   END IF;
   IF array_upper(b, 1) IS NULL THEN
-    RETURN a;
+    RETURN COALESCE(a, '{}'::INTEGER[]);
   END IF;
   r := a;
-  FOR i IN 1..array_upper(b, 1) LOOP  
+  FOR i IN 1..array_upper(b, 1) LOOP
     IF NOT (ARRAY[b[i]] <@ r) THEN
       r := r || b[i];
     END IF;
@@ -36,7 +60,7 @@ BEGIN
   RETURN r;
 END;
 $$
-LANGUAGE plpgsql IMMUTABLE;
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE;
 
 -- Return the node members with a given label from a relation member list
 -- as a set.
@@ -64,7 +88,27 @@ BEGIN
   RETURN;
 END;
 $$
-LANGUAGE plpgsql IMMUTABLE;
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE;
+
+
+CREATE OR REPLACE FUNCTION get_rel_node_members(members JSONB, memberLabels TEXT[])
+  RETURNS SETOF BIGINT
+  AS $$
+DECLARE
+  member JSONB;
+BEGIN
+  FOR member IN SELECT * FROM jsonb_array_elements(members)
+  LOOP
+    IF member->>'type' = 'N' and member->>'role' = ANY(memberLabels) THEN
+        RETURN NEXT (member->>'ref')::bigint;
+    END IF;
+  END LOOP;
+
+  RETURN;
+END;
+$$
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE;
+
 
 -- Copy 'name' to or from the default language.
 --
@@ -92,90 +136,112 @@ BEGIN
   END IF;
 END;
 $$
-LANGUAGE plpgsql IMMUTABLE;
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE;
 
 
--- Find the nearest artificial postcode for the given geometry.
--- TODO For areas there should not be more than two inside the geometry.
+-- Find the best-matching postcode for the given geometry
 CREATE OR REPLACE FUNCTION get_nearest_postcode(country VARCHAR(2), geom GEOMETRY)
   RETURNS TEXT
   AS $$
 DECLARE
   outcode TEXT;
   cnt INTEGER;
+  location RECORD;
 BEGIN
     -- If the geometry is an area then only one postcode must be within
     -- that area, otherwise consider the area as not having a postcode.
     IF ST_GeometryType(geom) in ('ST_Polygon','ST_MultiPolygon') THEN
-        SELECT min(postcode), count(*) FROM
-              (SELECT postcode FROM location_postcode
-                WHERE ST_Contains(geom, location_postcode.geometry) LIMIT 2) sub
-          INTO outcode, cnt;
+      SELECT min(postcode), count(*) FROM
+        (SELECT postcode FROM location_postcodes
+           WHERE ST_Contains(geom, location_postcodes.centroid)
+                 AND country_code = country
+           LIMIT 2) sub
+        INTO outcode, cnt;
 
         IF cnt = 1 THEN
             RETURN outcode;
-        ELSE
-            RETURN null;
         END IF;
+
+        RETURN null;
     END IF;
 
-    SELECT postcode FROM location_postcode
-     WHERE ST_DWithin(geom, location_postcode.geometry, 0.05)
-          AND location_postcode.country_code = country
-     ORDER BY ST_Distance(geom, location_postcode.geometry) LIMIT 1
-    INTO outcode;
+    -- Otherwise: be fully within the coverage area of a postcode
+    FOR location IN
+      SELECT postcode
+        FROM location_postcodes p
+       WHERE ST_Covers(p.geometry, geom)
+             AND p.country_code = country
+       ORDER BY osm_id is null, ST_Distance(p.centroid, geom)
+       LIMIT 1
+    LOOP
+        RETURN location.postcode;
+    END LOOP;
 
-    RETURN outcode;
+    RETURN NULL;
 END;
 $$
-LANGUAGE plpgsql STABLE;
+LANGUAGE plpgsql STABLE PARALLEL SAFE;
 
 
 CREATE OR REPLACE FUNCTION get_country_code(place geometry)
   RETURNS TEXT
   AS $$
 DECLARE
-  place_centre GEOMETRY;
   nearcountry RECORD;
+  countries TEXT[];
 BEGIN
-  place_centre := ST_PointOnSurface(place);
-
--- RAISE WARNING 'get_country_code, start: %', ST_AsText(place_centre);
+-- RAISE WARNING 'get_country_code, start: %', ST_AsText(place);
 
   -- Try for a OSM polygon
-  FOR nearcountry IN
-    SELECT country_code from location_area_country
-    WHERE country_code is not null and st_covers(geometry, place_centre) limit 1
-  LOOP
-    RETURN nearcountry.country_code;
-  END LOOP;
+  SELECT array_agg(country_code) FROM location_area_country
+    WHERE country_code is not null and st_covers(geometry, place)
+    INTO countries;
 
--- RAISE WARNING 'osm fallback: %', ST_AsText(place_centre);
+  IF array_length(countries, 1) = 1 THEN
+    RETURN countries[1];
+  END IF;
+
+  IF array_length(countries, 1) > 1 THEN
+    -- more than one country found, confirm against the fallback data what to choose
+    FOR nearcountry IN
+        SELECT country_code FROM country_osm_grid
+          WHERE ST_Covers(geometry, place) AND country_code = ANY(countries)
+          ORDER BY area ASC
+    LOOP
+        RETURN nearcountry.country_code;
+    END LOOP;
+    -- Still nothing? Choose the country code with the smallest partition number.
+    -- And failing that, just go by the alphabet.
+    FOR nearcountry IN
+        SELECT cc,
+               (SELECT partition FROM country_name WHERE country_code = cc) as partition
+        FROM unnest(countries) cc
+        ORDER BY partition, cc
+    LOOP
+        RETURN nearcountry.cc;
+    END LOOP;
+
+    -- Should never be reached.
+    RETURN countries[1];
+  END IF;
+
+-- RAISE WARNING 'osm fallback: %', ST_AsText(place);
 
   -- Try for OSM fallback data
   -- The order is to deal with places like HongKong that are 'states' within another polygon
   FOR nearcountry IN
     SELECT country_code from country_osm_grid
-    WHERE st_covers(geometry, place_centre) order by area asc limit 1
+    WHERE st_covers(geometry, place) order by area asc limit 1
   LOOP
     RETURN nearcountry.country_code;
   END LOOP;
 
--- RAISE WARNING 'near osm fallback: %', ST_AsText(place_centre);
-
-  -- 
-  FOR nearcountry IN
-    SELECT country_code from country_osm_grid
-    WHERE st_dwithin(geometry, place_centre, 0.5)
-    ORDER BY st_distance(geometry, place_centre) asc, area asc limit 1
-  LOOP
-    RETURN nearcountry.country_code;
-  END LOOP;
+-- RAISE WARNING 'near osm fallback: %', ST_AsText(place);
 
   RETURN NULL;
 END;
 $$
-LANGUAGE plpgsql STABLE;
+LANGUAGE plpgsql STABLE PARALLEL SAFE;
 
 
 CREATE OR REPLACE FUNCTION get_country_language_code(search_country_code VARCHAR(2))
@@ -193,7 +259,7 @@ BEGIN
   RETURN NULL;
 END;
 $$
-LANGUAGE plpgsql STABLE;
+LANGUAGE plpgsql STABLE PARALLEL SAFE;
 
 
 CREATE OR REPLACE FUNCTION get_partition(in_country_code VARCHAR(10))
@@ -210,55 +276,39 @@ BEGIN
   RETURN 0;
 END;
 $$
-LANGUAGE plpgsql STABLE;
+LANGUAGE plpgsql STABLE PARALLEL SAFE;
 
 
 -- Find the parent of an address with addr:street/addr:place tag.
 --
--- \param street     Value of addr:street or NULL if tag is missing.
--- \param place      Value of addr:place or NULL if tag is missing.
+-- \param token_info Naming info with the address information.
 -- \param partition  Partition where to search the parent.
 -- \param centroid   Location of the address.
 --
 -- \return Place ID of the parent if one was found, NULL otherwise.
-CREATE OR REPLACE FUNCTION find_parent_for_address(street TEXT, place TEXT,
+CREATE OR REPLACE FUNCTION find_parent_for_address(token_info JSONB,
                                                    partition SMALLINT,
                                                    centroid GEOMETRY)
   RETURNS BIGINT
   AS $$
 DECLARE
   parent_place_id BIGINT;
-  word_ids INTEGER[];
 BEGIN
-  IF street is not null THEN
-    -- Check for addr:street attributes
-    -- Note that addr:street links can only be indexed, once the street itself is indexed
-    word_ids := word_ids_from_name(street);
-    IF word_ids is not null THEN
-      parent_place_id := getNearestNamedRoadPlaceId(partition, centroid, word_ids);
-      IF parent_place_id is not null THEN
-        {% if debug %}RAISE WARNING 'Get parent form addr:street: %', parent_place_id;{% endif %}
-        RETURN parent_place_id;
-      END IF;
-    END IF;
+  -- Check for addr:street attributes
+  parent_place_id := getNearestNamedRoadPlaceId(partition, centroid, token_info);
+  IF parent_place_id is not null THEN
+    {% if debug %}RAISE WARNING 'Get parent from addr:street: %', parent_place_id;{% endif %}
+    RETURN parent_place_id;
   END IF;
 
   -- Check for addr:place attributes.
-  IF place is not null THEN
-    word_ids := word_ids_from_name(place);
-    IF word_ids is not null THEN
-      parent_place_id := getNearestNamedPlacePlaceId(partition, centroid, word_ids);
-      IF parent_place_id is not null THEN
-        {% if debug %}RAISE WARNING 'Get parent form addr:place: %', parent_place_id;{% endif %}
-        RETURN parent_place_id;
-      END IF;
-    END IF;
-  END IF;
-
-  RETURN NULL;
+  parent_place_id := getNearestNamedPlacePlaceId(partition, centroid, token_info);
+  {% if debug %}RAISE WARNING 'Get parent from addr:place: %', parent_place_id;{% endif %}
+  RETURN parent_place_id;
 END;
 $$
-LANGUAGE plpgsql STABLE;
+LANGUAGE plpgsql STABLE PARALLEL SAFE;
+
 
 CREATE OR REPLACE FUNCTION delete_location(OLD_place_id BIGINT)
   RETURNS BOOLEAN
@@ -271,6 +321,17 @@ BEGIN
 END;
 $$
 LANGUAGE plpgsql;
+
+
+-- Return the bounding box of the geometry buffered by the given number
+-- of meters.
+CREATE OR REPLACE FUNCTION expand_by_meters(geom GEOMETRY, meters FLOAT)
+  RETURNS GEOMETRY
+  AS $$
+    SELECT ST_Envelope(ST_Buffer(geom::geography, meters, 1)::geometry)
+$$
+LANGUAGE sql IMMUTABLE PARALLEL SAFE;
+
 
 -- Create a bounding box with an extent computed from the radius (in meters)
 -- which in turn is derived from the given search rank.
@@ -290,12 +351,10 @@ BEGIN
     radius := 1000;
   END IF;
 
-  RETURN ST_Envelope(ST_Collect(
-                     ST_Project(geom, radius, 0.785398)::geometry,
-                     ST_Project(geom, radius, 3.9269908)::geometry));
+  RETURN expand_by_meters(geom, radius);
 END;
 $$
-LANGUAGE plpgsql IMMUTABLE;
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE;
 
 
 CREATE OR REPLACE FUNCTION add_location(place_id BIGINT, country_code varchar(2),
@@ -306,30 +365,27 @@ CREATE OR REPLACE FUNCTION add_location(place_id BIGINT, country_code varchar(2)
   RETURNS BOOLEAN
   AS $$
 DECLARE
-  locationid INTEGER;
-  secgeo GEOMETRY;
   postcode TEXT;
 BEGIN
-  PERFORM deleteLocationArea(partition, place_id, rank_search);
-
   -- add postcode only if it contains a single entry, i.e. ignore postcode lists
   postcode := NULL;
   IF in_postcode is not null AND in_postcode not similar to '%(,|;)%' THEN
       postcode := upper(trim (in_postcode));
   END IF;
 
-  IF ST_GeometryType(geometry) in ('ST_Polygon','ST_MultiPolygon') THEN
-    FOR secgeo IN select split_geometry(geometry) AS geom LOOP
-      PERFORM insertLocationAreaLarge(partition, place_id, country_code, keywords, rank_search, rank_address, false, postcode, centroid, secgeo);
-    END LOOP;
-
-  ELSEIF ST_GeometryType(geometry) = 'ST_Point' THEN
-    secgeo := place_node_fuzzy_area(geometry, rank_search);
-    PERFORM insertLocationAreaLarge(partition, place_id, country_code, keywords, rank_search, rank_address, true, postcode, centroid, secgeo);
-
+  IF ST_Dimension(geometry) = 2 THEN
+    RETURN insertLocationAreaLarge(partition, place_id, country_code, keywords,
+                                   rank_search, rank_address, false, postcode,
+                                   centroid, geometry);
   END IF;
 
-  RETURN true;
+  IF ST_Dimension(geometry) = 0 THEN
+    RETURN insertLocationAreaLarge(partition, place_id, country_code, keywords,
+                                   rank_search, rank_address, true, postcode,
+                                   centroid, place_node_fuzzy_area(geometry, rank_search));
+  END IF;
+
+  RETURN false;
 END;
 $$
 LANGUAGE plpgsql;
@@ -352,19 +408,21 @@ DECLARE
   geo RECORD;
   area FLOAT;
   remainingdepth INTEGER;
-  added INTEGER;
 BEGIN
-
 --  RAISE WARNING 'quad_split_geometry: maxarea=%, depth=%',maxarea,maxdepth;
 
-  IF (ST_GeometryType(geometry) not in ('ST_Polygon','ST_MultiPolygon') OR NOT ST_IsValid(geometry)) THEN
+  IF not ST_IsValid(geometry) THEN
+    RETURN;
+  END IF;
+
+  IF ST_Dimension(geometry) != 2 OR maxdepth <= 1 THEN
     RETURN NEXT geometry;
     RETURN;
   END IF;
 
   remainingdepth := maxdepth - 1;
   area := ST_AREA(geometry);
-  IF remainingdepth < 1 OR area < maxarea THEN
+  IF area < maxarea THEN
     RETURN NEXT geometry;
     RETURN;
   END IF;
@@ -384,7 +442,6 @@ BEGIN
   xmid := (xmin+xmax)/2;
   ymid := (ymin+ymax)/2;
 
-  added := 0;
   FOR seg IN 1..4 LOOP
 
     IF seg = 1 THEN
@@ -400,23 +457,20 @@ BEGIN
       secbox := ST_SetSRID(ST_MakeBox2D(ST_Point(xmid,ymid),ST_Point(xmax,ymax)),4326);
     END IF;
 
-    IF st_intersects(geometry, secbox) THEN
-      secgeo := st_intersection(geometry, secbox);
-      IF NOT ST_IsEmpty(secgeo) AND ST_GeometryType(secgeo) in ('ST_Polygon','ST_MultiPolygon') THEN
-        FOR geo IN select quad_split_geometry(secgeo, maxarea, remainingdepth) as geom LOOP
-          IF NOT ST_IsEmpty(geo.geom) AND ST_GeometryType(geo.geom) in ('ST_Polygon','ST_MultiPolygon') THEN
-            added := added + 1;
-            RETURN NEXT geo.geom;
-          END IF;
-        END LOOP;
-      END IF;
+    secgeo := st_intersection(geometry, secbox);
+    IF NOT ST_IsEmpty(secgeo) AND ST_Dimension(secgeo) = 2 THEN
+      FOR geo IN SELECT quad_split_geometry(secgeo, maxarea, remainingdepth) as geom LOOP
+        IF NOT ST_IsEmpty(geo.geom) AND ST_Dimension(geo.geom) = 2 THEN
+          RETURN NEXT geo.geom;
+        END IF;
+      END LOOP;
     END IF;
   END LOOP;
 
   RETURN;
 END;
 $$
-LANGUAGE plpgsql IMMUTABLE;
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE;
 
 
 CREATE OR REPLACE FUNCTION split_geometry(geometry GEOMETRY)
@@ -425,14 +479,40 @@ CREATE OR REPLACE FUNCTION split_geometry(geometry GEOMETRY)
 DECLARE
   geo RECORD;
 BEGIN
-  -- 10000000000 is ~~ 1x1 degree
-  FOR geo IN select quad_split_geometry(geometry, 0.25, 20) as geom LOOP
-    RETURN NEXT geo.geom;
-  END LOOP;
+  IF ST_GeometryType(geometry) = 'ST_MultiPolygon'
+     and ST_Area(geometry) * 10 > ST_Area(Box2D(geometry))
+  THEN
+    FOR geo IN
+        SELECT quad_split_geometry(g, 0.25, 20) as geom
+        FROM (SELECT (ST_Dump(geometry)).geom::geometry(Polygon, 4326) AS g) xx
+    LOOP
+      RETURN NEXT geo.geom;
+    END LOOP;
+  ELSE
+    FOR geo IN
+        SELECT quad_split_geometry(geometry, 0.25, 20) as geom
+    LOOP
+      RETURN NEXT geo.geom;
+    END LOOP;
+  END IF;
   RETURN;
 END;
 $$
-LANGUAGE plpgsql IMMUTABLE;
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE;
+
+CREATE OR REPLACE FUNCTION simplify_large_polygons(geometry GEOMETRY)
+  RETURNS GEOMETRY
+  AS $$
+BEGIN
+  IF ST_GeometryType(geometry) in ('ST_Polygon','ST_MultiPolygon')
+     and ST_MemSize(geometry) > 3000000
+  THEN
+    geometry := ST_SimplifyPreserveTopology(geometry, 0.0001);
+  END IF;
+  RETURN geometry;
+END;
+$$
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE;
 
 
 CREATE OR REPLACE FUNCTION place_force_delete(placeid BIGINT)
@@ -447,9 +527,10 @@ BEGIN
   SELECT osm_type, osm_id, class, type FROM placex WHERE place_id = placeid INTO osmtype, osmid, pclass, ptype;
   DELETE FROM import_polygon_delete where osm_type = osmtype and osm_id = osmid and class = pclass and type = ptype;
   DELETE FROM import_polygon_error where osm_type = osmtype and osm_id = osmid and class = pclass and type = ptype;
-  -- force delete from place/placex by making it a very small geometry
-  UPDATE place set geometry = ST_SetSRID(ST_Point(0,0), 4326) where osm_type = osmtype and osm_id = osmid and class = pclass and type = ptype;
-  DELETE FROM place where osm_type = osmtype and osm_id = osmid and class = pclass and type = ptype;
+  -- force delete by directly entering it into the to-be-deleted table
+  INSERT INTO place_to_be_deleted (osm_type, osm_id, class, type, deferred)
+         VALUES(osmtype, osmid, pclass, ptype, false);
+  PERFORM flush_deleted_places();
 
   RETURN TRUE;
 END;
@@ -501,6 +582,94 @@ BEGIN
   END IF;
 
   RETURN FALSE;
+END;
+$$
+LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION flush_deleted_places()
+  RETURNS INTEGER
+  AS $$
+BEGIN
+  -- deleting large polygons can have a massive effect on the system - require manual intervention to let them through
+  INSERT INTO import_polygon_delete (osm_type, osm_id, class, type)
+    SELECT osm_type, osm_id, class, type FROM place_to_be_deleted WHERE deferred;
+
+  -- delete from place table
+  ALTER TABLE place DISABLE TRIGGER place_before_delete;
+  DELETE FROM place USING place_to_be_deleted
+    WHERE place.osm_type = place_to_be_deleted.osm_type
+          and place.osm_id = place_to_be_deleted.osm_id
+          and place.class = place_to_be_deleted.class
+          and place.type = place_to_be_deleted.type
+          and not deferred;
+  ALTER TABLE place ENABLE TRIGGER place_before_delete;
+
+  -- Mark for delete in the placex table
+  UPDATE placex SET indexed_status = 100 FROM place_to_be_deleted
+    WHERE placex.osm_type = 'N' and place_to_be_deleted.osm_type = 'N'
+          and placex.osm_id = place_to_be_deleted.osm_id
+          and placex.class = place_to_be_deleted.class
+          and placex.type = place_to_be_deleted.type
+          and not deferred;
+  UPDATE placex SET indexed_status = 100 FROM place_to_be_deleted
+    WHERE placex.osm_type = 'W' and place_to_be_deleted.osm_type = 'W'
+          and placex.osm_id = place_to_be_deleted.osm_id
+          and placex.class = place_to_be_deleted.class
+          and placex.type = place_to_be_deleted.type
+          and not deferred;
+  UPDATE placex SET indexed_status = 100 FROM place_to_be_deleted
+    WHERE placex.osm_type = 'R' and place_to_be_deleted.osm_type = 'R'
+          and placex.osm_id = place_to_be_deleted.osm_id
+          and placex.class = place_to_be_deleted.class
+          and placex.type = place_to_be_deleted.type
+          and not deferred;
+
+  -- Clear todo list.
+  TRUNCATE TABLE place_to_be_deleted;
+
+   -- delete from place_interpolation table
+  ALTER TABLE place_interpolation DISABLE TRIGGER place_interpolation_before_delete;
+  DELETE FROM place_interpolation p USING place_interpolation_to_be_deleted d
+    WHERE p.osm_id = d.osm_id;
+  ALTER TABLE place_interpolation ENABLE TRIGGER place_interpolation_before_delete;
+
+  UPDATE location_property_osmline o SET indexed_status = 100
+    FROM place_interpolation_to_be_deleted d
+    WHERE o.osm_id = d.osm_id;
+
+  TRUNCATE TABLE place_interpolation_to_be_deleted;
+
+  RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+
+CREATE OR REPLACE FUNCTION place_update_entrances(placeid BIGINT, osmid BIGINT)
+  RETURNS INTEGER
+  AS $$
+DECLARE
+  entrance RECORD;
+  osm_ids BIGINT[];
+BEGIN
+  osm_ids := '{}';
+  FOR entrance in SELECT osm_id, type, geometry, extratags
+      FROM place_entrance
+      WHERE osm_id IN (SELECT unnest(nodes) FROM planet_osm_ways WHERE id=osmid)
+  LOOP
+    osm_ids := array_append(osm_ids, entrance.osm_id);
+    INSERT INTO placex_entrance (place_id, osm_id, type, location, extratags)
+      VALUES (placeid, entrance.osm_id, entrance.type, entrance.geometry, entrance.extratags)
+      ON CONFLICT (place_id, osm_id) DO UPDATE
+        SET type = excluded.type, location = excluded.location, extratags = excluded.extratags;
+  END LOOP;
+
+  IF array_length(osm_ids, 1) > 0 THEN
+    DELETE FROM placex_entrance WHERE place_id=placeid AND NOT osm_id=ANY(osm_ids);
+  ELSE
+    DELETE FROM placex_entrance WHERE place_id=placeid;
+  END IF;
+
+  RETURN NULL;
 END;
 $$
 LANGUAGE plpgsql;

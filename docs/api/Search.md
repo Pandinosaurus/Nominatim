@@ -8,12 +8,12 @@ The search query may also contain
 which are translated into specific OpenStreetMap (OSM) tags (e.g. Pub => `amenity=pub`).
 This can be used to narrow down the kind of objects to be returned.
 
-!!! warning
+!!! note
     Special phrases are not suitable to query all objects of a certain type in an
     area. Nominatim will always just return a collection of the best matches. To
     download OSM data by object type, use the [Overpass API](https://overpass-api.de/).
 
-## Parameters
+## Endpoint
 
 The search API has the following format:
 
@@ -21,263 +21,486 @@ The search API has the following format:
    https://nominatim.openstreetmap.org/search?<params>
 ```
 
-The search term may be specified with two different sets of parameters:
+!!! danger "Deprecation warning"
+    The API can also be used with the URL
+    `https://nominatim.openstreetmap.org/search.php`. This is now deprecated
+    and will be removed in future versions.
 
-* `q=<query>`
+The query term can be given in two different forms: free-form or structured.
 
-    Free-form query string to search for.
-    Free-form queries are processed first left-to-right and then right-to-left if that fails. So you may search for
-    [pilkington avenue, birmingham](//nominatim.openstreetmap.org/search?q=pilkington+avenue,birmingham) as well as for
-    [birmingham, pilkington avenue](//nominatim.openstreetmap.org/search?q=birmingham,+pilkington+avenue).
-    Commas are optional, but improve performance by reducing the complexity of the search.
+### Free-form query
 
+| Parameter | Value |
+|-----------| ----- |
+| q         | Free-form query string to search for |
 
-* `street=<housenumber> <streetname>`
-* `city=<city>`
-* `county=<county>`
-* `state=<state>`
-* `country=<country>`
-* `postalcode=<postalcode>`
+In this form, the query can be unstructured.
+Free-form queries are processed first left-to-right and then right-to-left if that fails. So you may search for
+[pilkington avenue, birmingham](https://nominatim.openstreetmap.org/search?q=pilkington+avenue,birmingham) as well as for
+[birmingham, pilkington avenue](https://nominatim.openstreetmap.org/search?q=birmingham,+pilkington+avenue).
+Commas are optional, but improve performance by reducing the complexity of the search.
 
-    Alternative query string format split into several parameters for structured requests.
-    Structured requests are faster but are less robust against alternative
-    OSM tagging schemas. **Do not combine with** `q=<query>` **parameter**.
+The free-form may also contain special phrases to describe the type of
+place to be returned or a coordinate to search close to a position.
 
-Both query forms accept the additional parameters listed below.
+### Structured query
+
+| Parameter  | Value |
+|----------- | ----- |
+| amenity    | name and/or type of POI |
+| street     | housenumber and streetname |
+| city       | city |
+| county     | county |
+| state      | state |
+| country    | country |
+| postalcode | postal code |
+
+The structured form of the search query allows to lookup up an address
+that is already split into its components. Each parameter represents a field
+of the address. All parameters are optional. You should only use the ones
+that are relevant for the address you want to geocode.
+
+!!! Attention
+    Cannot be combined with the `q=<query>` parameter. Newer versions of
+    the API will return an error if you do so. Older versions simply return
+    unexpected results.
+
+## Parameters
+
+The following parameters can be used to further restrict the search and
+change the output. They are usable for both forms of the search query.
 
 ### Output format
 
-* `format=[xml|json|jsonv2|geojson|geocodejson]`
+| Parameter | Value | Default |
+|-----------| ----- | ------- |
+| format    | one of: `xml`, `json`, `jsonv2`, `geojson`, `geocodejson` | `jsonv2` |
 
-See [Place Output Formats](Output.md) for details on each format. (Default: jsonv2)
+See [Place Output Formats](Output.md) for details on each format.
 
-* `json_callback=<string>`
+!!! note
+    The Nominatim service at
+    [https://nominatim.openstreetmap.org](https://nominatim.openstreetmap.org)
+    has a different default behaviour for historical reasons. When the
+    `format` parameter is omitted, the request will be forwarded to the Web UI.
 
-Wrap JSON output in a callback function ([JSONP](https://en.wikipedia.org/wiki/JSONP)) i.e. `<string>(<json>)`.
+
+| Parameter | Value | Default |
+|-----------| ----- | ------- |
+| json_callback | function name | _unset_ |
+
+When given, then JSON output will be wrapped in a callback function with
+the given name. See [JSONP](https://en.wikipedia.org/wiki/JSONP) for more
+information.
+
 Only has an effect for JSON output formats.
+
+| Parameter | Value | Default |
+|-----------| ----- | ------- |
+| limit     | number | 10 |
+
+Limit the maximum number of returned results. Cannot be more than 40.
+Nominatim may decide to return less results than given, if additional
+results do not sufficiently match the query.
+
 
 ### Output details
 
-* `addressdetails=[0|1]`
+| Parameter | Value | Default |
+|-----------| ----- | ------- |
+| addressdetails | 0 or 1 | 0 |
 
-Include a breakdown of the address into elements. (Default: 0)
+When set to 1, include a breakdown of the address into elements.
+The exact content of the address breakdown depends on the output format.
+
+!!! tip
+    If you are interested in a stable classification of address categories
+    (suburb, city, state, etc), have a look at the `geocodejson` format.
+    All other formats return classifications according to OSM tagging.
+    There is a much larger set of categories and they are not always consistent,
+    which makes them very hard to work with.
 
 
-* `extratags=[0|1]`
+| Parameter | Value | Default |
+|-----------| ----- | ------- |
+| extratags | 0 or 1 | 0 |
 
-Include additional information in the result if available,
-e.g. wikipedia link, opening hours. (Default: 0)
+When set to 1, the response include any additional information in the result
+that is available in the database, e.g. wikipedia link, opening hours.
 
 
-* `namedetails=[0|1]`
+| Parameter | Value | Default |
+|-----------| ----- | ------- |
+| namedetails | 0 or 1 | 0 |
 
-Include a list of alternative names in the results. These may include
-language variants, references, operator and brand. (Default: 0)
+When set to 1, include a full list of names for the result. These may include
+language variants, older names, references and brand.
+
+| Parameter | Value | Default |
+|-----------| ----- | ------- |
+| entrances | 0 or 1 | 0 |
+
+When set to 1, include the tagged entrances in the result.
 
 
 ### Language of results
 
-* `accept-language=<browser language string>`
+| Parameter | Value | Default |
+|-----------| ----- | ------- |
+| accept-language | browser language string | content of "Accept-Language" HTTP header |
 
-Preferred language order for showing search results, overrides the value
-specified in the ["Accept-Language" HTTP header](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Accept-Language).
-Either use a standard RFC2616 accept-language string or a simple
-comma-separated list of language codes.
+Preferred language order for showing search results. This may either be
+a simple comma-separated list of language codes or have the same format
+as the ["Accept-Language" HTTP header](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Accept-Language).
 
-### Result limitation
+!!! tip
+    First-time users of Nominatim tend to be confused that they get different
+    results when using Nominatim in the browser versus in a command-line tool
+    like wget or curl. The command-line tools
+    usually don't send any Accept-Language header, prompting Nominatim
+    to show results in the local language. Browsers on the contrary always
+    send the currently chosen browser language.
 
-* `countrycodes=<countrycode>[,<countrycode>][,<countrycode>]...`
+### Result restriction
 
-Limit search results to one or more countries. `<countrycode>` must be the
-[ISO 3166-1alpha2](https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2) code,
-e.g. `gb` for the United Kingdom, `de` for Germany.
+There are two ways to influence the results. *Filters* exclude certain
+kinds of results completely. *Boost parameters* only change the order of the
+results and thus give a preference to some results over others.
+
+| Parameter | Value | Default |
+|-----------| ----- | ------- |
+| countrycodes | comma-separated list of country codes | _unset_ |
+
+Filter that limits the search results to one or more countries.
+The country code must be the
+[ISO 3166-1alpha2](https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2) code
+of the country, e.g. `gb` for the United Kingdom, `de` for Germany.
 
 Each place in Nominatim is assigned to one country code based
 on OSM country boundaries. In rare cases a place may not be in any country
-at all, for example, in international waters.
+at all, for example, when it is in international waters. These places are
+also excluded when the filter is set.
 
-* `exclude_place_ids=<place_id,[place_id],[place_id]`
+!!! Note
+    This parameter should not be confused with the 'country' parameter of
+    the structured query. The 'country' parameter contains a search term
+    and will be handled with some fuzziness. The `countrycodes` parameter
+    is a hard filter and as such should be preferred. Having both parameters
+    in the same query will work. If the parameters contradict each other,
+    the search will come up empty.
+
+| Parameter | Value | Default |
+|-----------| ----- | ------- |
+| layer     | comma-separated list of: `address`, `poi`, `railway`, `natural`, `manmade` | _unset_ (no restriction) |
+
+The layer filter allows to select places by themes.
+
+The `address` layer contains all places that make up an address:
+address points with house numbers, streets, inhabited places (suburbs, villages,
+cities, states tec.) and administrative boundaries.
+
+The `poi` layer selects all point of interest. This includes classic POIs like
+restaurants, shops, hotels but also less obvious features like recycling bins,
+guideposts or benches.
+
+The `railway` layer includes railway infrastructure like tracks.
+Note that in Nominatim's standard configuration, only very few railway
+features are imported into the database.
+
+The `natural` layer collects features like rivers, lakes and mountains while
+the `manmade` layer functions as a catch-all for features not covered by the
+other layers.
+
+| Parameter | Value | Default |
+|-----------| ----- | ------- |
+| featureType | one of: `country`, `state`, `city`, `settlement` | _unset_ |
+
+The featureType allows to have a more fine-grained selection for places
+from the address layer. Results can be restricted to places that make up
+the 'state', 'country' or 'city' part of an address. A featureType of
+`settlement` selects any human inhabited feature from 'state' down to
+'neighbourhood'.
+
+When featureType is set, then results are automatically restricted
+to the address layer (see above).
+
+!!! tip
+    Instead of using the featureType filters `country`, `state` or `city`,
+    you can also use a structured query without the finer-grained parameters
+    amenity or street.
+
+| Parameter | Value | Default |
+|-----------| ----- | ------- |
+| include   | comma-separated list of categories | _unset_ (no restriction) |
+| exclude   | comma-separated list of categories | _unset_ (no restriction) |
+
+Filters that select or drop results by category. A category describes what kind
+of place an object is. It has the form `osm.<key>.<value>`, taken from a main
+OSM tag of the object, for example `osm.amenity.restaurant`. An object has one
+category for every main tag it carries. A place tagged with `tourism=hotel` and
+`amenity=restaurant` therefore has the categories `osm.tourism.hotel` and
+`osm.amenity.restaurant`.
+
+Categories are hierarchical and a filter matches the category itself as well as
+all its descendants. `include=osm.amenity` selects restaurants, cafes,
+pharmacies and everything else carrying an `amenity` tag. A category must
+consist of at least two labels separated by dots, so `include=osm` is rejected
+with an error. Only letters, digits and underscores may appear in a label.
+Hyphens of the original OSM tag are replaced with underscores when the category
+is created, so `shop=car-repair` is selected with
+`include=osm.shop.car_repair`.
+
+Both parameters may be repeated. Note that a comma and a repetition combine
+the categories in different ways:
+
+| Query | Returns places that |
+|-------|---------------------|
+| `include=osm.amenity.cafe` | have `osm.amenity.cafe` |
+| `include=osm.amenity.cafe,osm.amenity.bar` | have `osm.amenity.cafe` **or** `osm.amenity.bar` |
+| `include=osm.tourism.hotel&include=osm.amenity.restaurant` | have `osm.tourism.hotel` **and** `osm.amenity.restaurant` |
+| `exclude=osm.amenity.fast_food` | do not have `osm.amenity.fast_food` |
+| `exclude=osm.shop.bakery,osm.amenity.cafe` | do not have `osm.shop.bakery` **and** `osm.amenity.cafe` at the same time |
+| `exclude=osm.shop.bakery&exclude=osm.amenity.cafe` | have neither `osm.shop.bakery` **nor** `osm.amenity.cafe` |
+
+
+!!! note
+    Categories are only used for filtering, they are never part of the output.
+    The `category`/`class` and `type` fields of a result contain the single
+    main tag that Nominatim uses to classify the place. That is only one of
+    the categories the place may have.
+
+!!! note
+    A place without any category cannot satisfy `include`. Postcodes, address
+    interpolations, TIGER housenumbers and countries returned from
+    Nominatim's built-in country-list fallback (used when no matching OSM
+    boundary was found) therefore disappear from the results as soon as
+    `include` is used. `exclude` has no effect on them. Countries backed by
+    an OSM boundary keep their usual category and are filtered normally.
+
+| Parameter | Value | Default |
+|-----------| ----- | ------- |
+| exclude_place_ids | comma-separated list of ids (OSM IDs where possible, otherwise place_ids or stable postcode refs) |
 
 If you do not want certain OSM objects to appear in the search
-result, give a comma separated list of the `place_id`s you want to skip.
+result, give a comma separated list of the ids you want to skip.
+
+Each entry may be one of:
+
+* a Nominatim internal `place_id` (for example `125279639`)
+* an OSM object reference in the form `<osm_type><osm_id>` where `<osm_type>` is one of `N` (node), `W` (way) or `R` (relation), for example `N107775`
+* a stable postcode reference in the form `P<country_code>:<postcode_id>`, for example `Pus:94110` or `Pgb:EH4_7EA`
+
+Usage of OSM IDs is recommended because they are server independent. Stable postcode refs should be used for artificial postcode results without an OSM object reference. In postcode refs, spaces are replaced with underscores. `place_id`s are still required for results without either kind of stable reference (for example, countries). When a street is excluded via its OSM ID, then interpolations and TIGER data derived from that street are excluded as well.
+
 This can be used to retrieve additional search results. For example, if a
 previous query only returned a few results, then including those here would
 cause the search to return other, less accurate, matches (if possible).
 
+| Parameter | Value | Default |
+|-----------| ----- | ------- |
+| viewbox   | `<x1>,<y1>,<x2>,<y2>` | _unset_ |
 
-* `limit=<integer>`
+Boost parameter which focuses the search on the given area.
+Any two corner points of the box are accepted as long as they make a proper
+box. `x` is longitude, `y` is latitude.
 
-Limit the number of returned results. (Default: 10, Maximum: 50)
+| Parameter | Value  | Default |
+|-----------| -----  | ------- |
+| bounded   | 0 or 1 | 0       |
 
+When set to 1, then it turns the 'viewbox' parameter (see above) into
+a filter parameter, excluding any results outside the viewbox.
 
-* `viewbox=<x1>,<y1>,<x2>,<y2>`
-
-The preferred area to find search results. Any two corner points of the box
-are accepted as long as they span a real box. `x` is longitude,
-`y` is latitude.
-
-
-* `bounded=[0|1]`
-
-When a viewbox is given, restrict the result to items contained within that
-viewbox (see above). When `viewbox` and `bounded=1` are given, an amenity
-only search is allowed. Give the special keyword for the amenity in square
+When `bounded=1` is given and the viewbox is small enough, then an amenity-only
+search is allowed. Give the special keyword for the amenity in square
 brackets, e.g. `[pub]` and a selection of objects of this type is returned.
-There is no guarantee that the result is complete. (Default: 0)
+There is no guarantee that the result returns all objects in the area.
 
 
 ### Polygon output
 
-* `polygon_geojson=1`
-* `polygon_kml=1`
-* `polygon_svg=1`
-* `polygon_text=1`
+| Parameter | Value  | Default |
+|-----------| -----  | ------- |
+| polygon_geojson | 0 or 1 | 0 |
+| polygon_kml     | 0 or 1 | 0 |
+| polygon_svg     | 0 or 1 | 0 |
+| polygon_text    | 0 or 1 | 0 |
 
-Output geometry of results as a GeoJSON, KML, SVG or WKT. Only one of these
-options can be used at a time. (Default: 0)
+Add the full geometry of the place to the result output. Output formats
+in GeoJSON, KML, SVG or WKT are supported. Only one of these
+options can be used at a time.
 
-* `polygon_threshold=0.0`
+| Parameter | Value  | Default |
+|-----------| -----  | ------- |
+| polygon_threshold | floating-point number | 0.0 |
 
-Return a simplified version of the output geometry. The parameter is the
+When one of the polygon_* outputs is chosen, return a simplified version
+of the output geometry. The parameter describes the
 tolerance in degrees with which the geometry may differ from the original
-geometry. Topology is preserved in the result. (Default: 0.0)
+geometry. Topology is preserved in the geometry.
 
 ### Other
 
-* `email=<valid email address>`
+| Parameter | Value  | Default |
+|-----------| -----  | ------- |
+| email     | valid email address | _unset_ |
 
 If you are making large numbers of request please include an appropriate email
-address to identify your requests. See Nominatim's [Usage Policy](https://operations.osmfoundation.org/policies/nominatim/) for more details.
+address to identify your requests. See Nominatim's
+[Usage Policy](https://operations.osmfoundation.org/policies/nominatim/) for more details.
 
-* `dedupe=[0|1]`
+| Parameter | Value  | Default |
+|-----------| -----  | ------- |
+| dedupe    | 0 or 1 | 1       |
 
 Sometimes you have several objects in OSM identifying the same place or
 object in reality. The simplest case is a street being split into many
 different OSM ways due to different characteristics. Nominatim will
-attempt to detect such duplicates and only return one match unless
-this parameter is set to 0. (Default: 1)
+attempt to detect such duplicates and only return one match. Setting
+this parameter to 0 disables this deduplication mechanism and
+ensures that all results are returned.
 
-* `debug=[0|1]`
+| Parameter | Value  | Default |
+|-----------| -----  | ------- |
+| debug     | 0 or 1 | 0       |
 
-Output assorted developer debug information. Data on internals of Nominatim's
-"Search Loop" logic, and SQL queries. The output is (rough) HTML format.
-This overrides the specified machine readable format. (Default: 0)
-
+Output special developer debug information instead of the normal result.
+See [Debug output](Output.md#debug-output) for details.
 
 
 ## Examples
 
 
-##### XML with kml polygon
+##### XML with KML polygon
 
-* [https://nominatim.openstreetmap.org/search?q=135+pilkington+avenue,+birmingham&format=xml&polygon_geojson=1&addressdetails=1](https://nominatim.openstreetmap.org/search?q=135+pilkington+avenue,+birmingham&format=xml&polygon_geojson=1&addressdetails=1)
+* [https://nominatim.openstreetmap.org/search?q=135+pilkington+avenue,+birmingham&format=xml&polygon_kml=1&addressdetails=1](https://nominatim.openstreetmap.org/search?q=135+pilkington+avenue,+birmingham&format=xml&polygon_kml=1&addressdetails=1)
 
 ```xml
-  <searchresults timestamp="Sat, 07 Nov 09 14:42:10 +0000" querystring="135 pilkington, avenue birmingham" polygon="true">
-    <place
-      place_id="1620612" osm_type="node" osm_id="452010817"
-      boundingbox="52.548641204834,52.5488433837891,-1.81612110137939,-1.81592094898224"
-      lat="52.5487429714954" lon="-1.81602098644987"
-      display_name="135, Pilkington Avenue, Wylde Green, City of Birmingham, West Midlands (county), B72, United Kingdom"
-      class="place" type="house">
-      <geokml>
-        <Polygon>
-          <outerBoundaryIs>
-            <LinearRing>
-              <coordinates>-1.816513,52.548756599999997 -1.816434,52.548747300000002 -1.816429,52.5487629 -1.8163717,52.548756099999999 -1.8163464,52.548834599999999 -1.8164599,52.548848100000001 -1.8164685,52.5488213 -1.8164913,52.548824000000003 -1.816513,52.548756599999997</coordinates>
-            </LinearRing>
-          </outerBoundaryIs>
-        </Polygon>
-      </geokml>
-      <house_number>135</house_number>
-      <road>Pilkington Avenue</road>
-      <village>Wylde Green</village>
-      <town>Sutton Coldfield</town>
-      <city>City of Birmingham</city>
-      <county>West Midlands (county)</county>
-      <postcode>B72</postcode>
-      <country>United Kingdom</country>
-      <country_code>gb</country_code>
-    </place>
-  </searchresults>
+<?xml version="1.0" encoding="UTF-8" ?>
+<searchresults timestamp="Tue, 08 Aug 2023 15:45:41 +00:00"
+               attribution="Data © OpenStreetMap contributors, ODbL 1.0. http://osm.org/copyright"
+               querystring="135 pilkington avenue, birmingham"
+               more_url="https://nominatim.openstreetmap.org/search?q=135+pilkington+avenue%2C+birmingham&amp;polygon_kml=1&amp;addressdetails=1&amp;limit=20&amp;exclude_place_ids=W90394480&amp;format=xml"
+               exclude_place_ids="W90394480">
+  <place place_id="125279639"
+         osm_type="way"
+         osm_id="90394480"
+         lat="52.5487921"
+         lon="-1.8164308"
+         boundingbox="52.5487473,52.5488481,-1.8165130,-1.8163464"
+         place_rank="30"
+         address_rank="30"
+         display_name="135, Pilkington Avenue, Maney, Sutton Coldfield, Wylde Green, Birmingham, West Midlands Combined Authority, England, B72 1LH, United Kingdom"
+         class="building"
+         type="residential"
+         importance="9.999999994736442e-08">
+    <geokml>
+      <Polygon>
+        <outerBoundaryIs>
+          <LinearRing>
+            <coordinates>-1.816513,52.5487566 -1.816434,52.5487473 -1.816429,52.5487629 -1.8163717,52.5487561 -1.8163464,52.5488346 -1.8164599,52.5488481 -1.8164685,52.5488213 -1.8164913,52.548824 -1.816513,52.5487566</coordinates>
+          </LinearRing>
+        </outerBoundaryIs>
+      </Polygon>
+    </geokml>
+    <house_number>135</house_number>
+    <road>Pilkington Avenue</road>
+    <hamlet>Maney</hamlet>
+    <town>Sutton Coldfield</town>
+    <village>Wylde Green</village>
+    <city>Birmingham</city>
+    <ISO3166-2-lvl8>GB-BIR</ISO3166-2-lvl8>
+    <state_district>West Midlands Combined Authority</state_district>
+    <state>England</state>
+    <ISO3166-2-lvl4>GB-ENG</ISO3166-2-lvl4>
+    <postcode>B72 1LH</postcode>
+    <country>United Kingdom</country>
+    <country_code>gb</country_code>
+  </place>
+</searchresults>
 ```
 
 ##### JSON with SVG polygon
 
-[https://nominatim.openstreetmap.org/search/Unter%20den%20Linden%201%20Berlin?format=json&addressdetails=1&limit=1&polygon_svg=1](https://nominatim.openstreetmap.org/search/Unter%20den%20Linden%201%20Berlin?format=json&addressdetails=1&limit=1&polygon_svg=1)
+[https://nominatim.openstreetmap.org/search?q=Unter%20den%20Linden%201%20Berlin&format=json&addressdetails=1&limit=1&polygon_svg=1](https://nominatim.openstreetmap.org/search?q=Unter%20den%20Linden%201%20Berlin&format=json&addressdetails=1&limit=1&polygon_svg=1)
 
 ```json
-    {
-        "address": {
-            "city": "Berlin",
-            "city_district": "Mitte",
-            "construction": "Unter den Linden",
-            "continent": "European Union",
-            "country": "Deutschland",
-            "country_code": "de",
-            "house_number": "1",
-            "neighbourhood": "Scheunenviertel",
-            "postcode": "10117",
-            "public_building": "Kommandantenhaus",
-            "state": "Berlin",
-            "suburb": "Mitte"
-        },
-        "boundingbox": [
-            "52.5170783996582",
-            "52.5173187255859",
-            "13.3975105285645",
-            "13.3981599807739"
-        ],
-        "class": "amenity",
-        "display_name": "Kommandantenhaus, 1, Unter den Linden, Scheunenviertel, Mitte, Berlin, 10117, Deutschland, European Union",
-        "importance": 0.73606775332943,
-        "lat": "52.51719785",
-        "licence": "Data \u00a9 OpenStreetMap contributors, ODbL 1.0. https://www.openstreetmap.org/copyright",
-        "lon": "13.3978352028938",
-        "osm_id": "15976890",
-        "osm_type": "way",
-        "place_id": "30848715",
-        "svg": "M 13.397511 -52.517283599999999 L 13.397829400000001 -52.517299800000004 13.398131599999999 -52.517315099999998 13.398159400000001 -52.517112099999999 13.3975388 -52.517080700000001 Z",
-        "type": "public_building"
-    }
+[
+  {
+    "address": {
+      "ISO3166-2-lvl4": "DE-BE",
+      "borough": "Mitte",
+      "city": "Berlin",
+      "country": "Deutschland",
+      "country_code": "de",
+      "historic": "Kommandantenhaus",
+      "house_number": "1",
+      "neighbourhood": "Friedrichswerder",
+      "postcode": "10117",
+      "road": "Unter den Linden",
+      "suburb": "Mitte"
+    },
+    "boundingbox": [
+      "52.5170798",
+      "52.5173311",
+      "13.3975116",
+      "13.3981577"
+    ],
+    "class": "historic",
+    "display_name": "Kommandantenhaus, 1, Unter den Linden, Friedrichswerder, Mitte, Berlin, 10117, Deutschland",
+    "importance": 0.8135042058306902,
+    "lat": "52.51720765",
+    "licence": "Data © OpenStreetMap contributors, ODbL 1.0. https://osm.org/copyright",
+    "lon": "13.397834399325466",
+    "osm_id": 15976890,
+    "osm_type": "way",
+    "place_id": 108681845,
+    "svg": "M 13.3975116 -52.5172905 L 13.397549 -52.5170798 13.397715 -52.5170906 13.3977122 -52.5171064 13.3977392 -52.5171086 13.3977417 -52.5170924 13.3979655 -52.5171069 13.3979623 -52.5171233 13.3979893 -52.5171248 13.3979922 -52.5171093 13.3981577 -52.5171203 13.398121 -52.5173311 13.3978115 -52.5173103 Z",
+    "type": "house"
+  }
+]
 ```
 
 ##### JSON with address details
 
-[https://nominatim.openstreetmap.org/?addressdetails=1&q=bakery+in+berlin+wedding&format=json&limit=1](https://nominatim.openstreetmap.org/?addressdetails=1&q=bakery+in+berlin+wedding&format=json&limit=1)
+[https://nominatim.openstreetmap.org/search?addressdetails=1&q=bakery+in+berlin+wedding&format=jsonv2&limit=1](https://nominatim.openstreetmap.org/search?addressdetails=1&q=bakery+in+berlin+wedding&format=jsonv2&limit=1)
 
 ```json
-    {
-        "address": {
-            "bakery": "B\u00e4cker Kamps",
-            "city_district": "Mitte",
-            "continent": "European Union",
-            "country": "Deutschland",
-            "country_code": "de",
-            "footway": "Bahnsteig U6",
-            "neighbourhood": "Sprengelkiez",
-            "postcode": "13353",
-            "state": "Berlin",
-            "suburb": "Wedding"
-        },
-        "boundingbox": [
-            "52.5460929870605",
-            "52.5460968017578",
-            "13.3591794967651",
-            "13.3591804504395"
-        ],
-        "class": "shop",
-        "display_name": "B\u00e4cker Kamps, Bahnsteig U6, Sprengelkiez, Wedding, Mitte, Berlin, 13353, Deutschland, European Union",
-        "icon": "https://nominatim.openstreetmap.org/images/mapicons/shopping_bakery.p.20.png",
-        "importance": 0.201,
-        "lat": "52.5460941",
-        "licence": "Data \u00a9 OpenStreetMap contributors, ODbL 1.0. https://www.openstreetmap.org/copyright",
-        "lon": "13.35918",
-        "osm_id": "317179427",
-        "osm_type": "node",
-        "place_id": "1453068",
-        "type": "bakery"
-    }
+[
+  {
+    "address": {
+      "ISO3166-2-lvl4": "DE-BE",
+      "borough": "Mitte",
+      "city": "Berlin",
+      "country": "Deutschland",
+      "country_code": "de",
+      "neighbourhood": "Sprengelkiez",
+      "postcode": "13347",
+      "road": "Lindower Straße",
+      "shop": "Ditsch",
+      "suburb": "Wedding"
+    },
+    "addresstype": "shop",
+    "boundingbox": [
+      "52.5427201",
+      "52.5427654",
+      "13.3668619",
+      "13.3669442"
+    ],
+    "category": "shop",
+    "display_name": "Ditsch, Lindower Straße, Sprengelkiez, Wedding, Mitte, Berlin, 13347, Deutschland",
+    "importance": 9.99999999995449e-06,
+    "lat": "52.54274275",
+    "licence": "Data © OpenStreetMap contributors, ODbL 1.0. http://osm.org/copyright",
+    "lon": "13.36690305710228",
+    "name": "Ditsch",
+    "osm_id": 437595031,
+    "osm_type": "way",
+    "place_id": 204751033,
+    "place_rank": 30,
+    "type": "bakery"
+  }
+]
 ```
 
 ##### GeoJSON

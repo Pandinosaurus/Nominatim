@@ -1,0 +1,262 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# This file is part of Nominatim. (https://nominatim.org)
+#
+# Copyright (C) 2025 by the Nominatim developer community.
+# For a full list of authors see the git log.
+"""
+Custom functions and expressions for SQLAlchemy.
+"""
+from __future__ import annotations
+from typing import Any
+
+import sqlalchemy as sa
+from sqlalchemy.ext.compiler import compiles
+
+from ..typing import SaColumn, SaFromClause
+
+
+class PlacexGeometryReverseLookuppolygon(sa.sql.functions.GenericFunction[Any]):
+    """ Check for conditions that allow partial index use on
+        'idx_placex_geometry_reverse_lookupPolygon'.
+
+        Needs to be constant, so that the query planner picks them up correctly
+        in prepared statements.
+    """
+    name = 'PlacexGeometryReverseLookuppolygon'
+    inherit_cache = True
+
+
+@compiles(PlacexGeometryReverseLookuppolygon)
+def _default_intersects(element: PlacexGeometryReverseLookuppolygon,
+                        compiler: 'sa.Compiled', **kw: Any) -> str:
+    return ("(ST_GeometryType(placex.geometry) in ('ST_Polygon', 'ST_MultiPolygon')"
+            " AND placex.rank_address between 4 and 25"
+            " AND placex.name is not null"
+            " AND placex.indexed_status = 0"
+            " AND placex.linked_place_id is null)")
+
+
+@compiles(PlacexGeometryReverseLookuppolygon, 'sqlite')
+def _sqlite_intersects(element: PlacexGeometryReverseLookuppolygon,
+                       compiler: 'sa.Compiled', **kw: Any) -> str:
+    return ("(ST_GeometryType(placex.geometry) in ('POLYGON', 'MULTIPOLYGON')"
+            " AND placex.rank_address between 4 and 25"
+            " AND placex.name is not null"
+            " AND placex.indexed_status = 0"
+            " AND placex.linked_place_id is null)")
+
+
+class IntersectsReverseDistance(sa.sql.functions.GenericFunction[Any]):
+    name = 'IntersectsReverseDistance'
+    inherit_cache = True
+
+    def __init__(self, table: sa.Table, geom: SaColumn) -> None:
+        super().__init__(table.c.geometry,
+                         table.c.rank_search, geom)
+        self.tablename = table.name
+
+
+@compiles(IntersectsReverseDistance)
+def default_reverse_place_diameter(element: IntersectsReverseDistance,
+                                   compiler: 'sa.Compiled', **kw: Any) -> str:
+    table = element.tablename
+    return f"({table}.rank_address between 4 and 25"\
+           f" AND {table}.name is not null"\
+           f" AND {table}.linked_place_id is null"\
+           f" AND {table}.osm_type = 'N'" + \
+           " AND ST_Buffer(%s, reverse_place_diameter(%s)) && %s)" \
+        % tuple(map(lambda c: compiler.process(c, **kw), element.clauses))
+
+
+@compiles(IntersectsReverseDistance, 'sqlite')
+def sqlite_reverse_place_diameter(element: IntersectsReverseDistance,
+                                  compiler: 'sa.Compiled', **kw: Any) -> str:
+    geom1, rank, geom2 = list(element.clauses)
+    table = element.tablename
+
+    return (f"({table}.rank_address between 4 and 25"
+            f" AND {table}.name is not null"
+            f" AND {table}.linked_place_id is null"
+            f" AND {table}.osm_type = 'N'"
+            "  AND MbrIntersects(%s, ST_Expand(%s, 14.0 * exp(-0.2 * %s) - 0.03))"
+            f" AND {table}.place_id IN"
+            "  (SELECT place_id FROM placex_place_node_areas"
+            "   WHERE ROWID IN (SELECT ROWID FROM SpatialIndex"
+            "   WHERE f_table_name = 'placex_place_node_areas'"
+            "   AND search_frame = %s)))") % (
+                compiler.process(geom1, **kw),
+                compiler.process(geom2, **kw),
+                compiler.process(rank, **kw),
+                compiler.process(geom2, **kw))
+
+
+class IsBelowReverseDistance(sa.sql.functions.GenericFunction[Any]):
+    name = 'IsBelowReverseDistance'
+    inherit_cache = True
+
+
+@compiles(IsBelowReverseDistance)
+def default_is_below_reverse_distance(element: IsBelowReverseDistance,
+                                      compiler: 'sa.Compiled', **kw: Any) -> str:
+    dist, rank = list(element.clauses)
+    return "%s < reverse_place_diameter(%s)" % (compiler.process(dist, **kw),
+                                                compiler.process(rank, **kw))
+
+
+@compiles(IsBelowReverseDistance, 'sqlite')
+def sqlite_is_below_reverse_distance(element: IsBelowReverseDistance,
+                                     compiler: 'sa.Compiled', **kw: Any) -> str:
+    dist, rank = list(element.clauses)
+    return "%s < 14.0 * exp(-0.2 * %s) - 0.03" % (compiler.process(dist, **kw),
+                                                  compiler.process(rank, **kw))
+
+
+class IsAddressPoint(sa.sql.functions.GenericFunction[Any]):
+    name = 'IsAddressPoint'
+    inherit_cache = True
+
+    def __init__(self, table: sa.Table) -> None:
+        super().__init__(table.c.rank_address,
+                         table.c.housenumber, table.c.name, table.c.address)
+
+
+@compiles(IsAddressPoint)
+def default_is_address_point(element: IsAddressPoint,
+                             compiler: 'sa.Compiled', **kw: Any) -> str:
+    rank, hnr, name, address = list(element.clauses)
+    return "(%s = 30 AND (%s IS NULL OR NOT %s ? '_inherited')" \
+           " AND (%s IS NOT NULL OR %s ? 'addr:housename'))" % (
+                compiler.process(rank, **kw),
+                compiler.process(address, **kw),
+                compiler.process(address, **kw),
+                compiler.process(hnr, **kw),
+                compiler.process(name, **kw))
+
+
+@compiles(IsAddressPoint, 'sqlite')
+def sqlite_is_address_point(element: IsAddressPoint,
+                            compiler: 'sa.Compiled', **kw: Any) -> str:
+    rank, hnr, name, address = list(element.clauses)
+    return "(%s = 30 AND json_extract(%s, '$._inherited') IS NULL" \
+           " AND coalesce(%s, json_extract(%s, '$.addr:housename')) IS NOT NULL)" % (
+                compiler.process(rank, **kw),
+                compiler.process(address, **kw),
+                compiler.process(hnr, **kw),
+                compiler.process(name, **kw))
+
+
+class CrosscheckNames(sa.sql.functions.GenericFunction[Any]):
+    """ Check if in the given list of names in parameters 1 any of the names
+        from the JSON array in parameter 2 are contained.
+    """
+    name = 'CrosscheckNames'
+    inherit_cache = True
+
+
+@compiles(CrosscheckNames)
+def compile_crosscheck_names(element: CrosscheckNames,
+                             compiler: 'sa.Compiled', **kw: Any) -> str:
+    arg1, arg2 = list(element.clauses)
+    return "coalesce(avals(%s) && ARRAY(SELECT * FROM json_array_elements_text(%s)), false)" % (
+            compiler.process(arg1, **kw), compiler.process(arg2, **kw))
+
+
+@compiles(CrosscheckNames, 'sqlite')
+def compile_sqlite_crosscheck_names(element: CrosscheckNames,
+                                    compiler: 'sa.Compiled', **kw: Any) -> str:
+    arg1, arg2 = list(element.clauses)
+    return "EXISTS(SELECT *"\
+           " FROM json_each(%s) as name, json_each(%s) as match_name"\
+           " WHERE name.value = match_name.value)"\
+           % (compiler.process(arg1, **kw), compiler.process(arg2, **kw))
+
+
+class JsonArrayEach(sa.sql.functions.GenericFunction[Any]):
+    """ Return elements of a json array as a set.
+    """
+    name = 'JsonArrayEach'
+    inherit_cache = True
+
+
+@compiles(JsonArrayEach)
+def default_json_array_each(element: JsonArrayEach, compiler: 'sa.Compiled', **kw: Any) -> str:
+    return "json_array_elements(%s)" % compiler.process(element.clauses, **kw)
+
+
+@compiles(JsonArrayEach, 'sqlite')
+def sqlite_json_array_each(element: JsonArrayEach, compiler: 'sa.Compiled', **kw: Any) -> str:
+    return "json_each(%s)" % compiler.process(element.clauses, **kw)
+
+
+class Greatest(sa.sql.functions.GenericFunction[Any]):
+    """ Function to compute maximum of all its input parameters.
+    """
+    name = 'greatest'
+    inherit_cache = True
+
+
+@compiles(Greatest, 'sqlite')
+def sqlite_greatest(element: Greatest, compiler: 'sa.Compiled', **kw: Any) -> str:
+    return "max(%s)" % compiler.process(element.clauses, **kw)
+
+
+class RegexpWord(sa.sql.functions.GenericFunction[Any]):
+    """ Check if a full word is in a given string.
+    """
+    name = 'RegexpWord'
+    inherit_cache = True
+
+
+@compiles(RegexpWord, 'postgresql')
+def postgres_regexp_nocase(element: RegexpWord, compiler: 'sa.Compiled', **kw: Any) -> str:
+    arg1, arg2 = list(element.clauses)
+    return "%s ~* ('\\m(' || %s  || ')\\M')::text" \
+        % (compiler.process(arg2, **kw), compiler.process(arg1, **kw))
+
+
+@compiles(RegexpWord, 'sqlite')
+def sqlite_regexp_nocase(element: RegexpWord, compiler: 'sa.Compiled', **kw: Any) -> str:
+    arg1, arg2 = list(element.clauses)
+    return "regexp('\\b(' || %s  || ')\\b', %s)"\
+        % (compiler.process(arg1, **kw), compiler.process(arg2, **kw))
+
+
+class CategoryMatch(sa.sql.functions.GenericFunction[Any]):
+    """ Match a placex row against a category or any of its descendants.
+
+        On PostgreSQL this queries the ltree 'categories' column using the
+        GiST index (``categories <@ '<category>'``). On SQLite, where the
+        categories are stored as a comma-separated text, the same is
+        emulated with a substring search.
+    """
+    name = 'CategoryMatch'
+    inherit_cache = True
+
+    def __init__(self, table: SaFromClause, category: str) -> None:
+        # The needles for the SQLite variant are precomputed here because
+        # SQLAlchemy 1.4 binds a parameter only once per statement, even
+        # when it is rendered more than once.
+        super().__init__(table.c.categories, sa.literal(category),
+                         sa.literal(f',{category},'), sa.literal(f',{category}.'))
+
+
+@compiles(CategoryMatch)
+def _default_category_match(element: CategoryMatch,
+                            compiler: 'sa.Compiled', **kw: Any) -> str:
+    cats, category, _, _ = list(element.clauses)
+    return "(%s <@ (%s)::ltree)" % (compiler.process(cats, **kw),
+                                    compiler.process(category, **kw))
+
+
+@compiles(CategoryMatch, 'sqlite')
+def _sqlite_category_match(element: CategoryMatch,
+                           compiler: 'sa.Compiled', **kw: Any) -> str:
+    cats, _, exact, descendants = list(element.clauses)
+    # The categories are padded with the separator on both sides, so that
+    # the needles match only on a full label boundary: ',<category>,' is an
+    # exact hit, ',<category>.' one of its descendants.
+    haystack = "(',' || %s || ',')" % compiler.process(cats, **kw)
+    return "(instr(%s, %s) > 0 OR instr(%s, %s) > 0)" \
+           % (haystack, compiler.process(exact, **kw),
+              haystack, compiler.process(descendants, **kw))

@@ -1,19 +1,201 @@
 # Database Migrations
 
-Since version 3.7.0 Nominatim offers automatic migrations. Please follow
+Nominatim offers automatic migrations for versions 4.3+. Please follow
 the following steps:
 
-* stop any updates that are potentially running
-* update Nominatim to the newer version
-* go to your project directory and run `nominatim admin --migrate`
-* (optionally) restart updates
+* Stop any updates that are potentially running
+* Update the backend: `pip install -U nominatim-db`
+* Go to your project directory and run `nominatim admin --migrate`
+* Update the frontend: `pip install -U nominatim-api`
+* (optionally) Restart updates
 
 Below you find additional migrations and hints about other structural and
 breaking changes. **Please read them before running the migration.**
 
 !!! note
-    If you are migrating from a version <3.6, then you still have to follow
-    the manual migration steps up to 3.6.
+    If you are migrating from a version <4.3, you need to install 4.3
+    and migrate to 4.3 first. Then you can migrate to the current
+    version. It is strongly recommended to do a reimport instead.
+
+## 5.3.0 -> 5.4.0
+
+### Places are classified by categories now
+
+Places have a new `categories` column on the `place` and `placex` tables. It
+holds the main tags of a place as hierarchical labels of the form
+`osm.<class>.<type>`, see
+[Database layout](../develop/Database-Layout.md#import-tables). The migration
+adds the column and fills it in `placex` from the `class` and `type` of the
+existing rows.
+
+The backfill only covers what the category search needs: the places that make
+up an address above street level and the POI categories that have a special
+phrase. A migrated database also keeps its old layout of one row per main tag.
+Reimport if you want the new `include` and `exclude` filters of the
+[search API](../api/Search.md#result-restriction) to find a place under all of
+its main tags.
+
+### The place_classtype tables are not used anymore
+
+Category search now runs against the `categories` column of `placex`, so the
+per-category `place_classtype_*` tables are not created or updated anymore.
+The migration leaves the existing tables in place because the old frontend
+code still queries them until you have restarted it with the new version.
+
+Once all your frontends run the new version, you can drop the tables to free
+the disk space. On a planet database that is a couple of hundred tables and
+several GB. To generate the necessary SQL, run:
+
+```sql
+SELECT format('DROP TABLE IF EXISTS %I;', tablename)
+  FROM pg_tables
+  WHERE schemaname = 'public' AND tablename LIKE 'place\_classtype\_%';
+```
+
+The `--min` option of `nominatim special-phrases` only restricted which of
+those tables were created. It has no effect anymore and is deprecated. It
+will be removed in a future version.
+
+## 5.2.0 -> 5.3.0
+
+#### Expensive table migrations
+
+This version introduces new tables for postcodes, interpolations and
+associatedStreet relations. Migration is possible but will take a bit
+longer. It is recommended to take Nominatim offline while migrating to 5.3.
+
+## 5.1.0 -> 5.2.0
+
+### Lua import style: required extratags removed
+
+Tags that are required by Nominatim as extratags are now always included
+independent of what is defined in the style. The line
+
+    flex.add_for_extratags('required')
+
+is no longer required in custom styles and will throw an error. Simply
+remove the line from your style.
+
+## 4.5.0 -> 5.0.0
+
+### PHP frontend removed
+
+The PHP frontend has been completely removed. Please switch to the Python
+frontend.
+
+Without the PHP code, the `nominatim refresh --website` command is no longer
+needed. It currently omits a warning and does otherwise nothing. It will be
+removed in later versions of Nominatim. So make sure you remove it from your
+scripts.
+
+### CMake building removed
+
+Nominatim can now only be installed via pip. Please follow the installation
+instructions for the current version to change to pip.
+
+### osm2pgsql no longer vendored in
+
+Nominatim no longer ships its own version of osm2pgsql. Please install a
+stock version of osm2pgsql from your distribution. See the
+[installation instruction for osm2pgsql](https://osm2pgsql.org/doc/install.html)
+for details. A minimum version of 1.8 is required. The current stable versions
+of Ubuntu and Debian already ship with an appropriate versions. For older
+installations, you may have to compile a newer osm2pgsql yourself.
+
+### Legacy tokenizer removed
+
+The `legacy` tokenizer is no longer enabled. This tokenizer has been superseded
+by the `ICU` tokenizer a long time ago. In the unlikely case that your database
+still uses the `legacy` tokenizer, you must reimport your database.
+
+### osm2pgsql style overhauled
+
+There are some fundamental changes to how customized osm2pgsql styles should
+be written. The changes are mostly backwards compatible, i.e. custom styles
+should still work with the new implementation. The only exception is a
+customization of the `process_tags()` function. This function is no longer
+considered public and neither are the helper functions used in it.
+They currently still work but will be removed at some point. If you have
+been making changes to `process_tags`, please review your style and try
+to switch to the new convenience functions.
+
+For more information on the changes, see the
+[pull request](https://github.com/osm-search/Nominatim/pull/3615)
+and read the new
+[customization documentation](https://nominatim.org/release-docs/latest/customize/Import-Styles/).
+
+## 4.4.0 -> 4.5.0
+
+### New structure for Python packages
+
+The nominatim Python package has been split into `nominatim-db` and `nominatim-api`.
+Any imports need to be adapted accordingly.
+
+If you are running the Python frontend, change the server module from
+`nominatim.server.falcon.server` to `nominatim_api.server.falcon.server`.
+
+If you are using the Nominatim library, all imports need to be changed
+from `nominatim.api.<module>` to `nominatim_api.<module>`.
+
+If you have written custom tokenizers or sanitizers, the appropriate modules
+are now found in `nominatim_db`.
+
+## 4.2.0 -> 4.3.0
+
+### New indexes for reverse lookup
+
+The reverse lookup algorithm has changed slightly to improve performance.
+This change needs a different index in the database. The required index
+will be automatically build during migration. Until the new index is available
+performance of the /reverse endpoint is significantly reduced. You should
+therefore either remove traffic from the machine before attempting a
+version update or create the index manually **before** starting the update
+using the following SQL:
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_placex_geometry_reverse_lookupPlaceNode
+  ON placex USING gist (ST_Buffer(geometry, reverse_place_diameter(rank_search)))
+  WHERE rank_address between 4 and 25 AND type != 'postcode'
+    AND name is not null AND linked_place_id is null AND osm_type = 'N';
+```
+
+## 4.0.0 -> 4.1.0
+
+### ICU tokenizer is the new default
+
+Nominatim now installs the [ICU tokenizer](../customize/Tokenizers.md#icu-tokenizer)
+by default. This only has an effect on newly installed databases. When
+updating older databases, it keeps its installed tokenizer. If you still
+run with the legacy tokenizer, make sure to compile Nominatim with the
+PostgreSQL module, see [Installation](Installation.md#building-nominatim).
+
+### geocodejson output changed
+
+The `type` field of the geocodejson output has changed. It now contains
+the address class of the object instead of the value of the OSM tag. If
+your client has used the `type` field, switch them to read `osm_value`
+instead.
+
+## 3.7.0 -> 4.0.0
+
+### NOMINATIM_PHRASE_CONFIG removed
+
+Custom blacklist configurations for special phrases now need to be handed
+with the `--config` parameter to `nominatim special-phrases`. Alternatively
+you can put your custom configuration in the project directory in a file
+named `phrase-settings.json`.
+
+Version 3.8 also removes the automatic converter for the php format of
+the configuration in older versions. If you are updating from Nominatim < 3.7
+and still work with a custom `phrase-settings.php`, you need to manually
+convert it into a json format.
+
+### PHP utils removed
+
+The old PHP utils have now been removed completely. You need to switch to
+the appropriate functions of the nominatim  command line tool. See
+[Introducing `nominatim` command line tool](#introducing-nominatim-command-line-tool)
+below.
 
 ## 3.6.0 -> 3.7.0
 
@@ -80,7 +262,7 @@ done
 
 The debugging UI is no longer directly provided with Nominatim. Instead we
 now provide a simple Javascript application. Please refer to
-[Setting up the Nominatim UI](../Setup-Nominatim-UI) for details on how to
+[Setting up the Nominatim UI](Setup-Nominatim-UI.md) for details on how to
 set up the UI.
 
 The icons served together with the API responses have been moved to the
@@ -122,6 +304,14 @@ configuration file, run the following command after updating:
 
 ```sh
 ./utils/setup.php --setup-website
+```
+
+### Update SQL code
+
+To update the SQL code to the leatest version run:
+
+```
+./utils/setup.php --create-functions --enable-diff-updates --create-partition-functions
 ```
 
 ## 3.4.0 -> 3.5.0

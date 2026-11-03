@@ -10,20 +10,20 @@ installation. For more details, please also have a look at the
 
 ## Installing nominatim-ui
 
-nominatim-ui does not need any special installation, just download, configure
-and run it.
+We provide regular releases of nominatim-ui that contain the packaged website.
+They do not need any special installation. Just download, configure
+and run it. Grab the latest release from
+[nominatim-ui's Github release page](https://github.com/osm-search/nominatim-ui/releases)
+and unpack it. You can use `nominatim-ui-x.x.x.tar.gz` or `nominatim-ui-x.x.x.zip`.
 
-Clone the source from github:
-
-    git clone https://github.com/osm-search/nominatim-ui
-
-Copy the example configuration into the right place:
+Next you need to adapt the UI to your installation. Custom settings need to be
+put into `dist/theme/config.theme.js`. At a minimum you need to
+set `Nominatim_API_Endpoint` to point to your Nominatim installation:
 
     cd nominatim-ui
-    cp dist/config.example.js dist/config.js
+    echo "Nominatim_Config.Nominatim_API_Endpoint='https://myserver.org/nominatim/';" > dist/theme/config.theme.js
 
-Now adapt the configuration to your needs. You need at least
-to change the `Nominatim_API_Endpoint` to point to your Nominatim installation.
+For the full set of available settings, have a look at `dist/config.defaults.js`.
 
 Then you can just test it locally by spinning up a webserver in the `dist`
 directory. For example, with Python:
@@ -36,11 +36,11 @@ The website is now available at `http://localhost:8765`.
 ## Forwarding searches to nominatim-ui
 
 Nominatim used to provide the search interface directly by itself when
-`format=html` was requested. For all endpoints except for `/reverse` and
-`/lookup` this even used to be the default.
+`format=html` was requested. For the `/search` endpoint this even used
+to be the default.
 
 The following section describes how to set up Apache or nginx, so that your
-users are forwarded to nominatim-ui when they go to URL that formerly presented
+users are forwarded to nominatim-ui when they go to a URL that formerly presented
 the UI.
 
 ### Setting up forwarding in Nginx
@@ -73,40 +73,27 @@ map $args $format {
 
 # Determine from the URI and the format parameter above if forwarding is needed.
 map $uri/$format $forward_to_ui {
-    default               1;   # The default is to forward.
-    ~^/ui                 0;   # If the URI point to the UI already, we are done.
-    ~/other$              0;   # An explicit non-html format parameter. No forwarding.
-    ~/reverse.*/default   0;   # Reverse and lookup assume xml format when
-    ~/lookup.*/default    0;   #   no format parameter is given. No forwarding.
+    default               0;  # no forwarding by default
+    ~/search.*/default    1;  # Use this line only, if search should go to UI by default.
+    ~/reverse.*/html      1;  # Forward API calls that UI supports, when
+    ~/status.*/html       1;  #   format=html is explicitly requested.
+    ~/search.*/html       1;
+    ~/details.*/html      1;
 }
 ```
 
 The `$forward_to_ui` parameter can now be used to conditionally forward the
 calls:
 
-```
-# When no endpoint is given, default to search.
-# Need to add a rewrite so that the rewrite rules below catch it correctly.
-rewrite ^/$ /search;
-
-location @php {
-    # fastcgi stuff..
+``` nginx
+location / {
     if ($forward_to_ui) {
-        rewrite ^(/[^/]*) https://yourserver.com/ui$1.html redirect;
+        rewrite ^(/[^/.]*) https://$http_host/ui$1.html redirect;
     }
-}
 
-location ~ [^/]\.php(/|$) {
-    # fastcgi stuff..
-    if ($forward_to_ui) {
-        rewrite (.*).php https://yourserver.com/ui$1.html redirect;
-    }
+    # proxy_pass commands
 }
 ```
-
-!!! warning
-    Be aware that the rewrite commands are slightly different for URIs with and
-    without the .php suffix.
 
 Reload nginx and the UI should be available.
 
@@ -159,26 +146,16 @@ directory like this:
   RewriteBase "/nominatim/"
 
   # If no endpoint is given, then use search.
-  RewriteRule ^(/|$)   "search.php"
+  RewriteRule ^(/|$)   "search"
 
-  # If format-html is explicity requested, forward to the UI.
+  # If format-html is explicitly requested, forward to the UI.
   RewriteCond %{QUERY_STRING} "format=html"
-  RewriteRule ^([^/]+).php ui/$1.html [R,END]
-  # Same but .php suffix is missing.
-  RewriteCond %{QUERY_STRING} "format=html"
-  RewriteRule ^([^/]+) ui/$1.html [R,END]
+  RewriteRule ^([^/.]+) ui/$1.html [R,END]
 
-  # If no format parameter is there then forward anything
-  # but /reverse and /lookup to the UI.
+  # Optionally: if no format parameter is there then forward /search.
   RewriteCond %{QUERY_STRING} "!format="
-  RewriteCond %{REQUEST_URI}  "!/lookup"
-  RewriteCond %{REQUEST_URI}  "!/reverse"
-  RewriteRule ^([^/]+).php ui/$1.html [R,END]
-  # Same but .php suffix is missing.
-  RewriteCond %{QUERY_STRING} "!format="
-  RewriteCond %{REQUEST_URI}  "!/lookup"
-  RewriteCond %{REQUEST_URI}  "!/reverse"
-  RewriteRule ^([^/]+) ui/$1.html [R,END]
+  RewriteCond %{REQUEST_URI}  "/search"
+  RewriteRule ^([^/.]+) ui/$1.html [R,END]
 </Directory>
 ```
 

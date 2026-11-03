@@ -1,0 +1,271 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# This file is part of Nominatim. (https://nominatim.org)
+#
+# Copyright (C) 2026 by the Nominatim developer community.
+# For a full list of authors see the git log.
+"""
+Tests for functions to import a new database.
+"""
+from pathlib import Path
+
+import pytest
+import pytest_asyncio  # noqa
+import psycopg
+from psycopg import sql as pysql
+
+from nominatim_db.tools import database_import
+from nominatim_db.errors import UsageError
+
+
+class TestDatabaseSetup:
+    DBNAME = 'test_nominatim_python_unittest'
+
+    @pytest.fixture(autouse=True)
+    def setup_nonexistant_db(self):
+        with psycopg.connect(dbname='postgres', autocommit=True) as conn:
+            with conn.cursor() as cur:
+                cur.execute(pysql.SQL('DROP DATABASE IF EXISTS ')
+                            + pysql.Identifier(self.DBNAME))
+
+            yield True
+
+            with conn.cursor() as cur:
+                cur.execute(pysql.SQL('DROP DATABASE IF EXISTS ')
+                            + pysql.Identifier(self.DBNAME))
+
+    @pytest.fixture
+    def cursor(self):
+        with psycopg.connect(dbname=self.DBNAME) as conn:
+            with conn.cursor() as cur:
+                yield cur
+
+    def conn(self):
+        return psycopg.connect(dbname=self.DBNAME)
+
+    def test_setup_skeleton(self):
+        database_import.setup_database_skeleton(f'dbname={self.DBNAME}')
+
+        # Check that all extensions are set up.
+        with self.conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute('CREATE TABLE t (h HSTORE, geom GEOMETRY(Geometry, 4326), path LTREE)')
+
+    def test_unsupported_pg_version(self, monkeypatch):
+        monkeypatch.setattr(database_import, 'POSTGRESQL_REQUIRED_VERSION', (100, 4))
+
+        with pytest.raises(UsageError, match='PostgreSQL server is too old.'):
+            database_import.setup_database_skeleton(f'dbname={self.DBNAME}')
+
+    def test_create_db_explicit_ro_user(self):
+        database_import.setup_database_skeleton(f'dbname={self.DBNAME}',
+                                                rouser='postgres')
+
+    def test_create_db_missing_ro_user(self):
+        with pytest.raises(UsageError, match='Missing read-only user.'):
+            database_import.setup_database_skeleton(f'dbname={self.DBNAME}',
+                                                    rouser='sdfwkjkjgdugu2jgsafkljas')
+
+    def test_setup_extensions_old_postgis(self, monkeypatch):
+        monkeypatch.setattr(database_import, 'POSTGIS_REQUIRED_VERSION', (50, 50))
+
+        with pytest.raises(UsageError, match='PostGIS is too old.'):
+            database_import.setup_database_skeleton(f'dbname={self.DBNAME}')
+
+
+def test_setup_skeleton_already_exists(temp_db):
+    with pytest.raises(UsageError):
+        database_import.setup_database_skeleton(f'dbname={temp_db}')
+
+
+def test_import_osm_data_simple(place_row, osm2pgsql_options, capfd):
+    place_row()
+
+    database_import.import_osm_data(Path('file.pbf'), osm2pgsql_options)
+    captured = capfd.readouterr()
+
+    assert '--create' in captured.out
+    assert '--output flex' in captured.out
+    assert f'--style {osm2pgsql_options["osm2pgsql_style"]}' in captured.out
+    assert f'--number-processes {osm2pgsql_options["threads"]}' in captured.out
+    assert f'--cache {osm2pgsql_options["osm2pgsql_cache"]}' in captured.out
+    assert 'file.pbf' in captured.out
+
+
+def test_import_osm_data_multifile(place_row, tmp_path, osm2pgsql_options, capfd):
+    place_row()
+    osm2pgsql_options['osm2pgsql_cache'] = 0
+
+    files = [tmp_path / 'file1.osm', tmp_path / 'file2.osm']
+    for f in files:
+        f.write_text('test', encoding='utf-8')
+
+    database_import.import_osm_data(files, osm2pgsql_options)
+    captured = capfd.readouterr()
+
+    assert 'file1.osm' in captured.out
+    assert 'file2.osm' in captured.out
+
+
+def test_import_osm_data_simple_no_data(place_row, osm2pgsql_options):
+    with pytest.raises(UsageError, match='No data imported'):
+        database_import.import_osm_data(Path('file.pbf'), osm2pgsql_options)
+
+
+def test_import_osm_data_simple_ignore_no_data(place_table, osm2pgsql_options):
+    database_import.import_osm_data(Path('file.pbf'), osm2pgsql_options,
+                                    ignore_errors=True)
+
+
+def test_import_osm_data_drop(place_row, table_factory, temp_db_cursor,
+                              tmp_path, osm2pgsql_options):
+    place_row()
+    table_factory('planet_osm_nodes')
+
+    flatfile = tmp_path / 'flatfile'
+    flatfile.write_text('touch', encoding='utf-8')
+
+    osm2pgsql_options['flatnode_file'] = str(flatfile.resolve())
+
+    database_import.import_osm_data(Path('file.pbf'), osm2pgsql_options, drop=True)
+
+    assert not flatfile.exists()
+    assert not temp_db_cursor.table_exists('planet_osm_nodes')
+
+
+def test_import_osm_data_default_cache(place_row, osm2pgsql_options, capfd):
+    place_row()
+
+    osm2pgsql_options['osm2pgsql_cache'] = 0
+
+    database_import.import_osm_data(Path(__file__), osm2pgsql_options)
+    captured = capfd.readouterr()
+
+    assert f'--cache {osm2pgsql_options["osm2pgsql_cache"]}' in captured.out
+
+
+@pytest.mark.parametrize("with_search", (True, False))
+def test_truncate_database_tables(temp_db_conn, temp_db_cursor, table_factory, with_search):
+    tables = ['placex', 'place_addressline', 'location_area',
+              'location_area_country',
+              'location_property_tiger', 'location_property_osmline',
+              'location_postcodes', 'location_road_23']
+    if with_search:
+        tables.append('search_name')
+
+    for table in tables:
+        table_factory(table, content=((1, ), (2, ), (3, )))
+        assert temp_db_cursor.table_rows(table) == 3
+
+    database_import.truncate_data_tables(temp_db_conn)
+
+    for table in tables:
+        assert temp_db_cursor.table_rows(table) == 0
+
+
+@pytest.mark.parametrize("threads", (1, 5))
+@pytest.mark.asyncio
+async def test_load_data(dsn, place_row, place_interpolation_row, placex_table,
+                         osmline_table, temp_db_cursor, threads):
+    for oid in range(100, 130):
+        place_row(osm_id=oid, categories=['osm.amenity.cafe'])
+    place_interpolation_row(osm_id=342, typ='odd', geom='LINESTRING(0 0, 10 10)')
+
+    temp_db_cursor.execute("""
+        CREATE OR REPLACE FUNCTION placex_insert() RETURNS TRIGGER AS $$
+        BEGIN
+          NEW.place_id := nextval('seq_place');
+          NEW.indexed_status := 1;
+          NEW.importance := 0.00001;
+          NEW.centroid := ST_Centroid(NEW.geometry);
+          NEW.partition := 0;
+          NEW.geometry_sector := 2424;
+          NEW.rank_address := 30;
+          NEW.rank_search := 30;
+        RETURN NEW;
+        END; $$ LANGUAGE plpgsql STABLE PARALLEL SAFE;
+
+        CREATE OR REPLACE FUNCTION osmline_insert() RETURNS TRIGGER AS $$
+        BEGIN
+          NEW.place_id := nextval('seq_place');
+          IF NEW.indexed_status IS NULL THEN
+            NEW.indexed_status := 1;
+            NEW.partition := 0;
+            NEW.geometry_sector := 2424;
+          END IF;
+        RETURN NEW;
+        END; $$ LANGUAGE plpgsql STABLE PARALLEL SAFE;
+
+        CREATE TRIGGER placex_before_insert BEFORE INSERT ON placex
+        FOR EACH ROW EXECUTE PROCEDURE placex_insert();
+
+        CREATE TRIGGER osmline_before_insert BEFORE INSERT ON location_property_osmline
+        FOR EACH ROW EXECUTE PROCEDURE osmline_insert();
+    """)
+
+    await database_import.load_data(dsn, threads)
+
+    assert temp_db_cursor.table_rows('placex') == 30
+    assert temp_db_cursor.table_rows('location_property_osmline') == 1
+    temp_db_cursor.execute(
+        "SELECT count(*) FROM placex "
+        "WHERE categories = ARRAY['osm.amenity.cafe'::ltree]"
+    )
+    assert temp_db_cursor.fetchone()[0] == 30
+
+
+class TestSetupSQL:
+
+    @pytest.fixture(autouse=True)
+    def osm2ppsql_skel(self, def_config, temp_db_with_extensions, place_row,
+                       country_table, table_factory, temp_db_conn):
+        self.config = def_config
+        place_row()
+        table_factory('osm2pgsql_properties', 'property TEXT, value TEXT',
+                      (('db_format', 2),))
+
+        table_factory('planet_osm_rels', 'id BIGINT, members JSONB, tags JSONB')
+        table_factory('place_associated_street',
+                      'relation_id BIGINT, member_type TEXT, member_id BIGINT, member_role TEXT')
+        temp_db_conn.execute("""
+            CREATE OR REPLACE FUNCTION planet_osm_member_ids(jsonb, character)
+              RETURNS bigint[] AS $$
+                SELECT array_agg((el->>'ref')::int8)
+                FROM jsonb_array_elements($1) AS el WHERE el->>'type' = $2
+              $$ LANGUAGE sql IMMUTABLE;
+            """)
+
+    @pytest.mark.parametrize("reverse", [True, False])
+    def test_create_tables(self, table_factory, temp_db_conn, temp_db_cursor, reverse):
+        table_factory('country_osm_grid')
+
+        database_import.create_tables(temp_db_conn, self.config, reverse)
+
+        assert temp_db_cursor.table_exists('placex')
+        assert not reverse == temp_db_cursor.table_exists('search_name')
+
+    def test_create_table_triggers(self, temp_db_conn, placex_table, osmline_table,
+                                   place_interpolation_table, postcode_table, load_sql):
+        load_sql('functions.sql')
+
+        database_import.create_table_triggers(temp_db_conn, self.config)
+
+    def test_create_partition_tables(self, country_row, temp_db_conn, temp_db_cursor, load_sql):
+        for i in range(3):
+            country_row(partition=i)
+        load_sql('tables/location_area.sql')
+
+        database_import.create_partition_tables(temp_db_conn, self.config)
+
+        for i in range(3):
+            assert temp_db_cursor.table_exists(f"location_area_large_{i}")
+            assert temp_db_cursor.table_exists(f"search_name_{i}")
+
+    @pytest.mark.parametrize("drop", [True, False])
+    @pytest.mark.asyncio
+    async def test_create_search_indices(self, temp_db_conn, temp_db_cursor, drop, load_sql):
+        load_sql('tables.sql', 'functions/ranking.sql')
+        await database_import.create_search_indices(temp_db_conn, self.config, drop)
+
+        assert temp_db_cursor.index_exists('placex', 'idx_placex_geometry')
+        assert not drop == temp_db_cursor.index_exists('placex', 'idx_placex_geometry_buildings')

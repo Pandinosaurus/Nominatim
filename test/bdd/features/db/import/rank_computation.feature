@@ -1,0 +1,318 @@
+Feature: Rank assignment
+    Tests for assignment of search and address ranks.
+
+    Scenario: Ranks for place nodes are assigned according to their type
+        Given the named places
+          | osm  | class     | type      | geometry |
+          | N1   | foo       | bar       | 0 0 |
+          | N11  | place     | Continent | 0 0 |
+          | N12  | place     | continent | 0 0 |
+          | N13  | place     | sea       | 0 0 |
+          | N14  | place     | country   | 0 0 |
+          | N15  | place     | state     | 0 0 |
+          | N16  | place     | region    | 0 0 |
+          | N17  | place     | county    | 0 0 |
+          | N18  | place     | city      | 0 0 |
+          | N19  | place     | island    | 0 0 |
+          | N36  | place     | house     | 0 0 |
+        And the named places
+          | osm  | class     | type      | extra+capital | geometry |
+          | N101 | place     | city      | yes           | 0 0 |
+        When importing
+        Then placex contains
+          | object | rank_search | rank_address |
+          | N1     | 30          | 30 |
+          | N11    | 22          | 0 |
+          | N12    | 2           | 0 |
+          | N13    | 2           | 0 |
+          | N14    | 4           | 0 |
+          | N15    | 8           | 0 |
+          | N16    | 18          | 0 |
+          | N17    | 12          | 12 |
+          | N18    | 16          | 16 |
+          | N19    | 17          | 0 |
+          | N101   | 15          | 16 |
+          | N36    | 30          | 30 |
+
+    Scenario: Ranks for boundaries are assigned according to admin level
+        Given the named places
+          | osm | class    | type           | admin | geometry |
+          | R20 | boundary | administrative | 2     | (1 1, 2 2, 1 2, 1 1) |
+          | R21 | boundary | administrative | 32    | (3 3, 4 4, 3 4, 3 3) |
+          | R22 | boundary | administrative | 6     | (0 0, 1 0, 0 1, 0 0) |
+          | R23 | boundary | administrative | 10    | (0 0, 1 1, 1 0, 0 0) |
+        When importing
+        Then placex contains
+          | object | rank_search | rank_address |
+          | R20    | 4           | 4 |
+          | R21    | 25          | 0 |
+          | R22    | 12          | 12 |
+          | R23    | 20          | 20 |
+
+    Scenario: Ranks for addressable boundaries with place assignment go with place address ranks if available
+        Given the named places
+          | osm | class    | type           | admin | categories                                     | geometry             |
+          | R20 | boundary | administrative | 3     | osm.boundary.administrative, osm.place.state   | (1 1, 2 2, 1 2, 1 1) |
+          | R21 | boundary | administrative | 32    | osm.boundary.administrative, osm.place.suburb  | (3 3, 4 4, 3 4, 3 3) |
+          | R22 | boundary | administrative | 6     | osm.boundary.administrative, osm.place.town    | (0 0, 1 0, 0 1, 0 0) |
+          | R23 | boundary | administrative | 10    | osm.boundary.administrative, osm.place.village | (0 0, 1 1, 1 0, 0 0) |
+        When importing
+        Then placex contains
+          | object | rank_search | rank_address |
+          | R20    | 6           | 6  |
+          | R21    | 25          | 0  |
+          | R22    | 12          | 16 |
+          | R23    | 20          | 16 |
+
+    Scenario: Place address ranks cannot overtake a parent address rank
+        Given the named places
+          | osm | class    | type           | admin | categories                                          | geometry                  |
+          | R20 | boundary | administrative | 8     | osm.boundary.administrative, osm.place.town         | (0 0, 0 2, 2 2, 2 0, 0 0) |
+          | R21 | boundary | administrative | 9     | osm.boundary.administrative, osm.place.municipality | (0 0, 0 1, 1 1, 1 0, 0 0) |
+          | R22 | boundary | administrative | 9     | osm.boundary.administrative, osm.place.suburb       | (0 0, 0 1, 1 1, 1 0, 0 0) |
+        When importing
+        Then placex contains
+          | object | rank_search | rank_address |
+          | R20    | 16          | 16 |
+          | R21    | 18          | 18 |
+          | R22    | 18          | 20 |
+        Then place_addressline contains
+            | object | address | cached_rank_address |
+            | R21    | R20     | 16                  |
+            | R22    | R20     | 16                  |
+
+    Scenario: Admin levels cannot overtake each other due to place address ranks
+        Given the named places
+          | osm | class    | type           | admin | categories                                    | geometry                  |
+          | R20 | boundary | administrative | 6     | osm.boundary.administrative, osm.place.town   | (0 0, 0 2, 2 2, 2 0, 0 0) |
+          | R21 | boundary | administrative | 8     | osm.boundary.administrative                   | (0 0, 0 1, 1 1, 1 0, 0 0) |
+          | R22 | boundary | administrative | 8     | osm.boundary.administrative, osm.place.suburb | (0 0, 0 1, 1 1, 1 0, 0 0) |
+        When importing
+        Then placex contains
+          | object | rank_search | rank_address |
+          | R20    | 12          | 16 |
+          | R21    | 16          | 18 |
+          | R22    | 16          | 20 |
+        Then place_addressline contains
+            | object | address | cached_rank_address |
+            | R21    | R20     | 16                  |
+            | R22    | R20     | 16                  |
+
+    Scenario: Admin levels cannot overtake each other due to place address ranks even when slightly misaligned
+        Given the named places
+          | osm | class    | type           | admin | categories                                  | geometry                        |
+          | R20 | boundary | administrative | 6     | osm.boundary.administrative, osm.place.town | (0 0, 0 2, 2 2, 2 0, 0 0)       |
+          | R21 | boundary | administrative | 8     | osm.boundary.administrative                 | (0 0, -0.0001 1, 1 1, 1 0, 0 0) |
+        When importing
+        Then placex contains
+          | object | rank_search | rank_address |
+          | R20    | 12          | 16 |
+          | R21    | 16          | 18 |
+        Then place_addressline contains
+            | object | address | cached_rank_address |
+            | R21    | R20     | 16                  |
+
+    Scenario: Admin levels must not be larger than 25
+        Given the named places
+          | osm | class    | type           | admin | categories                                     | geometry                          |
+          | R20 | boundary | administrative | 6     | osm.boundary.administrative, osm.place.quarter | (0 0, 0 2, 2 2, 2 0, 0 0)         |
+          | R21 | boundary | administrative | 7     | osm.boundary.administrative                    | (0 0, 0 1, 1 1, 1 0, 0 0)         |
+          | R22 | boundary | administrative | 8     | osm.boundary.administrative                    | (0 0, 0 0.5, 0.5 0.5, 0.5 0, 0 0) |
+        When importing
+        Then placex contains
+          | object | rank_search | rank_address |
+          | R20    | 12          | 22 |
+          | R21    | 14          | 24 |
+          | R22    | 16          | 25 |
+
+    Scenario: admin levels contained in a place area must not overtake address ranks
+        Given the named places
+            | osm | class    | type           | admin | geometry |
+            | R10 | place    | city           | 15    | (0 0, 0 2, 2 0, 0 0) |
+            | R20 | boundary | administrative | 6     | (0 0, 0 1, 1 0, 0 0) |
+        When importing
+        Then placex contains
+            | object | rank_search | rank_address |
+            | R10    | 16          | 16           |
+            | R20    | 12          | 18           |
+
+    Scenario: admin levels overlapping a place area are not demoted
+        Given the named places
+            | osm | class    | type           | admin | geometry |
+            | R10 | place    | city           | 15    | (0 0, 0 2, 2 0, 0 0) |
+            | R20 | boundary | administrative | 6     | (-1 0, 0 1, 1 0, -1 0) |
+        When importing
+        Then placex contains
+            | object | rank_search | rank_address |
+            | R10    | 16          | 16           |
+            | R20    | 12          | 12           |
+
+    Scenario: admin levels with equal area as a place area are not demoted
+        Given the named places
+            | osm | class    | type           | admin | geometry |
+            | R10 | place    | city           | 15    | (0 0, 0 2, 2 0, 0 0) |
+            | R20 | boundary | administrative | 6     | (0 0, 0 2, 2 0, 0 0) |
+        When importing
+        Then placex contains
+            | object | rank_search | rank_address |
+            | R10    | 16          | 16           |
+            | R20    | 12          | 12           |
+
+
+    Scenario: adjacent admin_levels are considered the same object when they have the same wikidata
+        Given the named places
+          | osm | class    | type           | admin | extra+wikidata | geometry |
+          | N20 | place    | square         | 15    | Q123           | 0.1 0.1  |
+          | R23 | boundary | administrative | 10    | Q444           | (0 0, 0 1, 1 1, 1 0, 0 0) |
+          | R21 | boundary | administrative | 9     | Q444           | (0 0, 0 1, 1 1, 1 0, 0 0) |
+          | R22 | boundary | administrative | 8     | Q444           | (0 0, 0 1, 1 1, 1 0, 0 0) |
+        When importing
+        Then placex contains
+          | object | rank_search | rank_address |
+          | R23    | 20          | 0  |
+          | R21    | 18          | 0  |
+          | R22    | 16          | 16 |
+        Then place_addressline contains exactly
+            | object | address | cached_rank_address |
+            | N20    | R22     | 16                  |
+
+    Scenario: adjacent admin_levels are considered different objects when they have different wikidata
+        Given the named places
+          | osm | class    | type           | admin | extra+wikidata | geometry |
+          | N20 | place    | square         | 15    | Q123           | 0.1 0.1  |
+          | R21 | boundary | administrative | 9     | Q4441          | (0 0, 0 1, 1 1, 1 0, 0 0) |
+          | R22 | boundary | administrative | 8     | Q444           | (0 0, 0 1, 1 1, 1 0, 0 0) |
+        When importing
+        Then placex contains
+          | object | rank_search | rank_address |
+          | R21    | 18          | 18 |
+          | R22    | 16          | 16 |
+        Then place_addressline contains
+            | object | address | cached_rank_address |
+            | N20    | R22     | 16                  |
+            | N20    | R21     | 18                  |
+
+    Scenario: Mixes of admin boundaries and place areas I
+        Given the grid
+          | 1 |   | 10 |  |  | 2 |
+          |   | 9 |    |  |  |   |
+          | 20|   | 21 |  |  |   |
+          | 4 |   | 11 |  |  | 3 |
+        And the places
+          | osm | class    | type           | admin | name           | geometry      |
+          | R1  | boundary | administrative | 5     | Greater London | (1,2,3,4,1)   |
+          | R2  | boundary | administrative | 8     | Kensington     | (1,10,11,4,1) |
+        And the places
+          | osm | class    | type           | name           | geometry    |
+          | R10 | place    | city           | London         | (1,2,3,4,1) |
+          | N9  | place    | town           | Fulham         | 9           |
+          | W1  | highway  | residential    | Lots Grove     | 20,21       |
+        When importing
+        Then placex contains
+         | object | rank_search | rank_address |
+         | R1     | 10          | 10           |
+         | R10    | 16          | 16           |
+         | R2     | 16          | 18           |
+         | N9     | 18          | 18           |
+        And place_addressline contains
+         | object | address | isaddress | cached_rank_address |
+         | W1     | R1      | True      | 10                  |
+         | W1     | R10     | True      | 16                  |
+         | W1     | R2      | True      | 18                  |
+         | W1     | N9      | False     | 18                  |
+
+
+    Scenario: Mixes of admin boundaries and place areas II
+        Given the grid
+          | 1 |   | 10 |  | 5 | 2 |
+          |   | 9 |    |  |   |   |
+          | 20|   | 21 |  |   |   |
+          | 4 |   | 11 |  | 6 | 3 |
+        And the places
+          | osm | class    | type           | admin | name           | geometry    |
+          | R1  | boundary | administrative | 5     | Greater London | (1,2,3,4,1) |
+          | R2  | boundary | administrative | 8     | London         | (1,5,6,4,1) |
+        And the places
+          | osm | class    | type           | name           | geometry      |
+          | R10 | place    | city           | Westminster    | (1,10,11,4,1) |
+          | N9  | place    | town           | Fulham         | 9             |
+          | W1  | highway  | residential    | Lots Grove     | 20,21         |
+        When importing
+        Then placex contains
+         | object | rank_search | rank_address |
+         | R1     | 10          | 10           |
+         | R2     | 16          | 16           |
+         | R10    | 16          | 18           |
+         | N9     | 18          | 18           |
+        And place_addressline contains
+         | object | address | isaddress | cached_rank_address |
+         | W1     | R1      | True      | 10                  |
+         | W1     | R10     | True      | 18                  |
+         | W1     | R2      | True      | 16                  |
+         | W1     | N9      | False     | 18                  |
+
+
+    Scenario: POI nodes with place tags
+        Given the places
+          | osm | class   | type       | name | categories             |
+          | N23 | amenity | playground | AB   | osm.amenity.playground |
+          | N23 | place   | city       | AB   | osm.place.city         |
+        When importing
+        Then placex contains exactly
+          | object      | rank_search | rank_address |
+          | N23:amenity | 30          | 30           |
+          | N23:place   | 16          | 16           |
+
+    Scenario: Higher address rank wins with multiple categories
+        Given the named places
+          | osm  | class    | type  | name  | categories                       | geometry |
+          | W100 | lock     | yes   | Gate  | osm.lock.yes                     |    5 5   |
+          | W101 | waterway | river | Rhine | osm.waterway.river               |    5 5   |
+          | W102 | lock     | yes   | Gate2 | osm.lock.yes, osm.waterway.river |    5 5   |
+        When importing
+        Then placex contains
+          | object | rank_search | rank_address |
+          | W100   |      30     |     30       |
+          | W101   |      19     |     0        |
+          | W102   |      30     |     30       |
+
+    Scenario: Address rank 25 is only used for addr:place
+        Given the grid
+           | 10 | 33 | 34 | 11 |
+        Given the places
+          | osm | class | type    | name |
+          | N10 | place | village | vil  |
+          | N11 | place | farm    | farm |
+        And the places
+          | osm | class   | type        | name | geometry |
+          | W1  | highway | residential | RD   | 33,11    |
+        And the places
+          | osm | class   | type        | name | addr+farm | geometry |
+          | W2  | highway | residential | RD2  | farm       | 34,11    |
+        And the places
+          | osm | class | type  | housenr |
+          | N33 | place | house | 23      |
+        And the places
+          | osm | class | type  | housenr | addr+place |
+          | N34 | place | house | 23      | farm       |
+        When importing
+        Then placex contains
+          | object | parent_place_id |
+          | N11    | N10             |
+          | N33    | W1              |
+          | N34    | N11             |
+        And place_addressline contains
+          | object | address |
+          | W1     | N10     |
+          | W2     | N10     |
+          | W2     | N11     |
+
+
+    Scenario: Boundary categories are ignored for ranking on non-area objects
+        Given the named places
+          | osm | class    | type           | admin | categories                                      | geometry |
+          | W20 | boundary | administrative | 4     | osm.waterway.river, osm.boundary.administrative | 1 1, 2 2 |
+        When importing
+        Then placex contains
+          | object | rank_search | rank_address |
+          | W20    | 19          | 0 |

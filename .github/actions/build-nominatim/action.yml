@@ -1,29 +1,44 @@
 name: 'Build Nominatim'
 
+inputs:
+    dependencies:
+        description: 'Where to install dependencies from (pip/apt)'
+        required: false
+        default: 'pip'
+
 runs:
     using: "composite"
 
     steps:
-        - name: Install prerequisites
+        - name: Clean out the disk
           run: |
-            sudo apt-get install -y -qq libboost-system-dev libboost-filesystem-dev libexpat1-dev zlib1g-dev libbz2-dev libpq-dev libproj-dev libicu-dev python3-psycopg2 python3-pyosmium python3-dotenv python3-psutil python3-jinja2 python3-icu python3-argparse-manpage
+            sudo rm -rf /opt/hostedtoolcache/go /opt/hostedtoolcache/CodeQL /usr/lib/jvm /usr/local/share/chromium /usr/local/lib/android
+            df -h
+          shell: bash
+        - name: Install general prerequisites
+          run: |
+            sudo apt-get install -y -qq libspatialite-dev libsqlite3-mod-spatialite libicu-dev virtualenv python3-dev osm2pgsql
           shell: bash
 
-        - name: Download dependencies
+        - name: Install prerequisites from apt
           run: |
-              if [ ! -f country_grid.sql.gz ]; then
-                  wget --no-verbose https://www.nominatim.org/data/country_grid.sql.gz
-              fi
-              cp country_grid.sql.gz Nominatim/data/country_osm_grid.sql.gz
+            sudo apt-get install -y -qq python3-icu python3-datrie python3-jinja2 python3-psutil python3-dotenv python3-yaml python3-sqlalchemy python3-psycopg python3-asyncpg python3-mwparserfromhell
           shell: bash
+          if: inputs.dependencies == 'apt'
 
-        - name: Configure
-          run: mkdir build && cd build && cmake ../Nominatim
-          shell: bash
-
-        - name: Build
+        - name: Setup virtual environment (for pip)
           run: |
-              make -j2 all
-              sudo make install
+            virtualenv venv
+            ./venv/bin/pip install -U pip
           shell: bash
-          working-directory: build
+          if: inputs.dependencies == 'pip'
+
+        - name: Setup virtual environment (for apt)
+          run: |
+            virtualenv venv --system-site-packages
+          shell: bash
+          if: inputs.dependencies == 'apt'
+
+        - name: Build nominatim
+          run: ./venv/bin/pip install Nominatim/packaging/nominatim-{api,db}
+          shell: bash

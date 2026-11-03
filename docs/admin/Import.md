@@ -14,15 +14,15 @@ to a single Nominatim setup: configuration, extra data, etc. Create a project
 directory apart from the Nominatim software and change into the directory:
 
 ```
-mkdir ~/nominatim-planet
-cd ~/nominatim-planet
+mkdir ~/nominatim-project
+cd ~/nominatim-project
 ```
 
 In the following, we refer to the project directory as `$PROJECT_DIR`. To be
 able to copy&paste instructions, you can export the appropriate variable:
 
 ```
-export PROJECT_DIR=~/nominatim-planet
+export PROJECT_DIR=~/nominatim-project
 ```
 
 The Nominatim tool assumes per default that the current working directory is
@@ -40,15 +40,16 @@ all commands from the project directory.
 
 ### Configuration setup in `.env`
 
-The Nominatim server can be customized via an `.env` configuration file in the
+The Nominatim server can be customized via an `.env` configuration file in the 
 project directory. This is a file in [dotenv](https://github.com/theskumar/python-dotenv)
 format which looks the same as variable settings in a standard shell environment.
 You can also set the same configuration via environment variables. All
 settings have a `NOMINATIM_` prefix to avoid conflicts with other environment
 variables.
 
-There are lots of configuration settings you can tweak. Have a look
-at `settings/env.default` for a full list. Most should have a sensible default.
+There are lots of configuration settings you can tweak. A full reference
+can be found in the chapter [Configuration Settings](../customize/Settings.md).
+Most should have a sensible default.
 
 #### Flatnode files
 
@@ -73,25 +74,32 @@ but it will improve the quality of the results if this is installed.
 This data is available as a binary download. Put it into your project directory:
 
     cd $PROJECT_DIR
-    wget https://www.nominatim.org/data/wikimedia-importance.sql.gz
+    wget https://nominatim.org/data/wikimedia-importance.csv.gz
+    wget -O secondary_importance.sql.gz https://nominatim.org/data/wikimedia-secondary-importance.sql.gz
 
-The file is about 400MB and adds around 4GB to the Nominatim database.
+The files are about 400MB and add around 4GB to the Nominatim database. For
+more information about importance,
+see [Importance Customization](../customize/Importance.md).
 
 !!! tip
-    If you forgot to download the wikipedia rankings, you can also add
-    importances after the import. Download the files, then run
-    `nominatim refresh --wiki-data --importance`. Updating importances for
-    a planet can take a couple of hours.
+    If you forgot to download the wikipedia rankings, then you can
+    also add importances after the import. Download the SQL files, then
+    run `nominatim refresh --wiki-data --secondary-importance --importance`.
+    Updating importances for a planet will take a couple of hours.
 
-### Great Britain, USA postcodes
+### External postcodes
 
-Nominatim can use postcodes from an external source to improve searches that
-involve a GB or US postcode. This data can be optionally downloaded into the
-project directory:
+Nominatim can use postcodes from an external source to improve searching with
+postcodes. We provide precomputed postcodes sets for the US (using TIGER data)
+and the UK (using the [CodePoint OpenData set](https://osdatahub.os.uk/downloads/open/CodePointOpen).
+This data can be optionally downloaded into the project directory:
 
     cd $PROJECT_DIR
-    wget https://www.nominatim.org/data/gb_postcode_data.sql.gz
-    wget https://www.nominatim.org/data/us_postcode_data.sql.gz
+    wget https://nominatim.org/data/gb_postcodes.csv.gz
+    wget https://nominatim.org/data/us_postcodes.csv.gz
+
+You can also add your own custom postcode sources, see
+[Customization of postcodes](../customize/Postcodes.md).
 
 ## Choosing the data to import
 
@@ -107,7 +115,7 @@ If you only need geocoding for a smaller region, then precomputed OSM extracts
 are a good way to reduce the database size and import time.
 [Geofabrik](https://download.geofabrik.de) offers extracts for most countries.
 They even have daily updates which can be used with the update process described
-[in the next section](../Update). There are also
+[in the next section](Update.md). There are also
 [other providers for extracts](https://wiki.openstreetmap.org/wiki/Planet.osm#Downloading).
 
 Please be aware that some extracts are not cut exactly along the country
@@ -133,14 +141,22 @@ Note that you still need to provide for sufficient disk space for the initial
 import. So this option is particularly interesting if you plan to transfer the
 database or reuse the space later.
 
+!!! warning
+    The data structure for updates are also required when adding additional data
+    after the import, for example [TIGER housenumber data](../customize/Tiger.md).
+    If you plan to use those, you must not use the `--no-updates` parameter.
+    Do a normal import, add the external data and once you are done with
+    everything run `nominatim freeze`.
+
+
 ### Reverse-only Imports
 
 If you only want to use the Nominatim database for reverse lookups or
 if you plan to use the installation only for exports to a
-[photon](https://photon.komoot.de/) database, then you can set up a database
+[photon](https://photon.komoot.io/) database, then you can set up a database
 without search indexes. Add `--reverse-only` to your setup command above.
 
-This saves about 5% of disk space.
+This saves about 5% of disk space, import time won't be significant faster.
 
 ### Filtering Imported Data
 
@@ -148,15 +164,15 @@ Nominatim normally sets up a full search database containing administrative
 boundaries, places, streets, addresses and POI data. There are also other
 import styles available which only read selected data:
 
-* **settings/import-admin.style**
+* **admin**
   Only import administrative boundaries and places.
-* **settings/import-street.style**
+* **street**
   Like the admin style but also adds streets.
-* **settings/import-address.style**
+* **address**
   Import all data necessary to compute addresses down to house number level.
-* **settings/import-full.style**
+* **full**
   Default style that also includes points of interest.
-* **settings/import-extratags.style**
+* **extratags**
   Like the full style but also adds most of the OSM tags into the extratags
   column.
 
@@ -179,8 +195,8 @@ full      |   54h        |  640 GB    |  330 GB
 extratags |   54h        |  650 GB    |  340 GB
 
 You can also customize the styles further.
-A [description of the style format](../develop/Import.md#configuring-the-import) 
-can be found in the development section.
+A [description of the style format](../customize/Import-Styles.md)
+can be found in the customization guide.
 
 ## Initial import of the data
 
@@ -189,11 +205,14 @@ can be found in the development section.
     [Geofabrik](https://download.geofabrik.de).
 
 Download the data to import. Then issue the following command
-from the **build directory** to start the import:
+from the **project directory** to start the import:
 
 ```sh
 nominatim import --osm-file <data file> 2>&1 | tee setup.log
 ```
+
+The **project directory** is the one that you have set up at the beginning.
+See [creating the project directory](#creating-the-project-directory).
 
 ### Notes on full planet imports
 
@@ -212,7 +231,7 @@ to load the OSM data into the PostgreSQL database. This step is very demanding
 in terms of RAM usage. osm2pgsql and PostgreSQL are running in parallel at 
 this point. PostgreSQL blocks at least the part of RAM that has been configured
 with the `shared_buffers` parameter during
-[PostgreSQL tuning](Installation#postgresql-tuning)
+[PostgreSQL tuning](Installation.md#tuning-the-postgresql-database)
 and needs some memory on top of that. osm2pgsql needs at least 2GB of RAM for
 its internal data structures, potentially more when it has to process very large
 relations. In addition it needs to maintain a cache for node locations. The size
@@ -231,76 +250,67 @@ reduce the cache size or even consider using a flatnode file.
 
 ### Testing the installation
 
-Run this script to verify all required tables and indices got created successfully.
+Run this script to verify that all required tables and indices got created
+successfully.
 
 ```sh
 nominatim admin --check-database
 ```
 
-Now you can try out your installation by running:
+If you have installed the `nominatim-api` package, then you can try out
+your installation by executing a simple query on the command line:
 
-```sh
+``` sh
+nominatim search --query Berlin
+```
+
+or, when you have a reverse-only installation:
+
+``` sh
+nominatim reverse --lat 51 --lon 45
+```
+
+If you want to run Nominatim as a service, make sure you have installed
+the right packages as per [Installation](Installation.md#software).
+
+#### Testing the Python frontend
+
+To run the test server against the Python frontend, you must choose a
+web framework to use, either starlette or falcon. Make sure the appropriate
+packages are installed. Then run
+
+``` sh
 nominatim serve
 ```
 
-This runs a small test server normally used for development. You can use it
-to verify that your installation is working. Go to
-`http://localhost:8088/status.php` and you should see the message `OK`.
-You can also run a search query, e.g. `http://localhost:8088/search.php?q=Berlin`.
+or, if you prefer to use Starlette instead of Falcon as webserver,
 
-To run Nominatim via webservers like Apache or nginx, please read the
-[Deployment chapter](Deployment.md).
-
-## Tuning the database
-
-Accurate word frequency information for search terms helps PostgreSQL's query
-planner to make the right decisions. Recomputing them can improve the performance
-of forward geocoding in particular under high load. To recompute word counts run:
-
-```sh
-nominatim refresh --word-counts
+``` sh
+nominatim serve --engine starlette
 ```
 
-This will take a couple of hours for a full planet installation. You can
-also defer that step to a later point in time when you realise that
-performance becomes an issue. Just make sure that updates are stopped before
-running this function.
+Go to `http://localhost:8088/status` and you should see the message `OK`.
+You can also run a search query, e.g. `http://localhost:8088/search?q=Berlin`
+or, for reverse-only installations a reverse query,
+e.g. `http://localhost:8088/reverse?lat=27.1750090510034&lon=78.04209025`.
 
-If you want to be able to search for places by their type through
-[special key phrases](https://wiki.openstreetmap.org/wiki/Nominatim/Special_Phrases)
+Do not use this test server in production.
+To run Nominatim via webservers like Apache or nginx, please continue reading
+[Deploy the Python frontend](Deployment-Python.md).
+
+
+## Enabling search by category phrases
+
+To be able to search for places by their type using
+[special phrases](https://wiki.openstreetmap.org/wiki/Nominatim/Special_Phrases)
 you also need to import these key phrases like this:
 
-    nominatim special-phrases --import-from-wiki
+```sh
+nominatim special-phrases --import-from-wiki
+```
 
 Note that this command downloads the phrases from the wiki link above. You
 need internet access for the step.
 
-
-## Installing Tiger housenumber data for the US
-
-Nominatim is able to use the official [TIGER](https://www.census.gov/geographies/mapping-files/time-series/geo/tiger-line-file.html)
-address set to complement the OSM house number data in the US. You can add
-TIGER data to your own Nominatim instance by following these steps. The
-entire US adds about 10GB to your database.
-
-  1. Get preprocessed TIGER 2020 data:
-
-        cd $PROJECT_DIR
-        wget https://nominatim.org/data/tiger2020-nominatim-preprocessed.tar.gz
-
-  2. Import the data into your Nominatim database:
-
-        nominatim add-data --tiger-data tiger2020-nominatim-preprocessed.tar.gz
-
-  3. Enable use of the Tiger data in your `.env` by adding:
-
-        echo NOMINATIM_USE_US_TIGER_DATA=yes >> .env
-
-  4. Apply the new settings:
-
-        nominatim refresh --functions
-
-
-See the [developer's guide](../develop/data-sources.md#us-census-tiger) for more
-information on how the data got preprocessed.
-
+You can also import special phrases from a csv file, for more 
+information please see the [Customization part](../customize/Special-Phrases.md).

@@ -1,0 +1,153 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# This file is part of Nominatim. (https://nominatim.org)
+#
+# Copyright (C) 2025 by the Nominatim developer community.
+# For a full list of authors see the git log.
+"""
+Tests for loading of parameter dataclasses.
+"""
+import pytest
+
+from nominatim_api.errors import UsageError
+import nominatim_api.types as typ
+
+
+def test_no_params_defaults():
+    params = typ.LookupDetails.from_kwargs({})
+
+    assert not params.parented_places
+    assert params.geometry_simplification == 0.0
+
+
+@pytest.mark.parametrize('k,v', [('geometry_output',  'a'),
+                                 ('linked_places', 0),
+                                 ('geometry_simplification', 'NaN')])
+def test_bad_format_reverse(k, v):
+    with pytest.raises(UsageError):
+        typ.ReverseDetails.from_kwargs({k: v})
+
+
+@pytest.mark.parametrize('rin,rout', [(-23, 0), (0, 0), (1, 1),
+                                      (15, 15), (30, 30), (31, 30)])
+def test_rank_params(rin, rout):
+    params = typ.ReverseDetails.from_kwargs({'max_rank': rin})
+
+    assert params.max_rank == rout
+
+
+class TestFormatExcluded:
+
+    @pytest.mark.parametrize('inp', ['', None])
+    def test_empty_value(self, inp):
+        assert typ.format_excluded(inp) == []
+
+    @pytest.mark.parametrize('inp,expected', [
+        ('123', [typ.PlaceID(123)]),
+        ('123,456', [typ.PlaceID(123), typ.PlaceID(456)]),
+        ('N100', [typ.OsmID('N', 100)]),
+        ('W101', [typ.OsmID('W', 101)]),
+        ('R102', [typ.OsmID('R', 102)]),
+        ('Pus:94110', [typ.PostcodeRef('us', '94110')]),
+        ('Pgb:EH4_7EA', [typ.PostcodeRef('gb', 'EH4 7EA')]),
+        ('N100,W101,R102', [typ.OsmID('N', 100), typ.OsmID('W', 101), typ.OsmID('R', 102)]),
+        ('n100', [typ.OsmID('N', 100)]),
+        ('123,N456,W789,Pus:94110', [typ.PlaceID(123), typ.OsmID('N', 456),
+                                     typ.OsmID('W', 789),
+                                     typ.PostcodeRef('us', '94110')]),
+        (' 123 , N456 ', [typ.PlaceID(123), typ.OsmID('N', 456)]),
+        ('123,,456', [typ.PlaceID(123), typ.PlaceID(456)]),
+        ('0', []),
+        ('N0', []),
+        ('000123', [typ.PlaceID(123)])
+    ])
+    def test_valid_exclude_ids(self, inp, expected):
+        assert typ.format_excluded(inp) == expected
+
+    @pytest.mark.parametrize('inp, bad_id', [
+        ('abc', 'abc'),
+        ('X999', 'X999'),
+        ('-540', '-540'),
+        ('N-100', 'N-100'),
+        ('123,abc,456', 'abc'),
+        ('N:100', 'N:100'),
+        ('Pus', 'Pus'),
+        ('P:94110', 'P:94110'),
+        ('Pusa:94110', 'Pusa:94110'),
+        ('Pus:', 'Pus:')
+        ])
+    def test_invalid_exclude_ids(self, inp, bad_id):
+        with pytest.raises(UsageError, match=f"Invalid exclude ID: {bad_id}"):
+            typ.format_excluded(inp)
+
+    @pytest.mark.parametrize('inp', [[12.5], [{'key': 'value'}], [[123, 456]]])
+    def test_invalid_list_element_type(self, inp):
+        with pytest.raises(UsageError, match="Parameter 'excluded' contains invalid types."):
+            typ.format_excluded(inp)
+
+
+class TestFormatCategoryFilters:
+
+    def test_empty(self):
+        assert typ.format_category_filters([]) == []
+
+    def test_single_string(self):
+        assert typ.format_category_filters('osm.amenity.restaurant') \
+               == [['osm.amenity.restaurant']]
+
+    def test_comma_separated_is_one_group(self):
+        assert typ.format_category_filters(['osm.amenity.cafe,osm.amenity.bar']) \
+               == [['osm.amenity.cafe', 'osm.amenity.bar']]
+
+    def test_repeated_parameter_makes_groups(self):
+        assert typ.format_category_filters(['osm.tourism.hotel', 'osm.amenity.restaurant']) \
+               == [['osm.tourism.hotel'], ['osm.amenity.restaurant']]
+
+    def test_surrounding_whitespace_ignored(self):
+        assert typ.format_category_filters([' osm.amenity.cafe , osm.amenity.bar ']) \
+               == [['osm.amenity.cafe', 'osm.amenity.bar']]
+
+    def test_more_than_two_labels(self):
+        assert typ.format_category_filters(['osm.boundary.administrative.4']) \
+               == [['osm.boundary.administrative.4']]
+
+    @pytest.mark.parametrize('inp', ['osm', '', '.', 'osm.', '.amenity', 'osm..cafe',
+                                     'osm.amenity restaurant', 'osm.amenity;cafe',
+                                     'osm.shop.car-repair',
+                                     'osm.amenity.' + 'x' * 256])
+    def test_invalid_category(self, inp):
+        with pytest.raises(UsageError, match='Invalid category'):
+            typ.format_category_filters([inp])
+
+    def test_invalid_category_in_group(self):
+        with pytest.raises(UsageError, match='Invalid category'):
+            typ.format_category_filters(['osm.amenity.cafe,osm'])
+
+    def test_non_string(self):
+        with pytest.raises(UsageError, match='must be strings'):
+            typ.format_category_filters([12])
+
+
+@pytest.mark.parametrize('inp,expected', [
+    ('Pus:94110', typ.PostcodeRef('us', '94110')),
+    ('Pgb:EH4_7EA', typ.PostcodeRef('gb', 'EH4 7EA')),
+])
+def test_parse_place_ref(inp, expected):
+    assert typ.parse_place_ref(inp) == expected
+
+
+@pytest.mark.parametrize('inp,expected', [
+    ('Pus:94110', typ.PostcodeRef('us', '94110')),
+    ('Pgb:EH4_7EA', typ.PostcodeRef('gb', 'EH4 7EA')),
+    ('us:94110', typ.PostcodeRef('us', '94110')),
+    ('gb:EH4_7EA', typ.PostcodeRef('gb', 'EH4 7EA')),
+])
+def test_parse_postcode_param(inp, expected):
+    assert typ.parse_postcode_param(inp) == expected
+
+
+def test_postcode_ref_normalizes_underscores_to_spaces():
+    ref = typ.PostcodeRef('gb', 'EH4_7EA')
+
+    assert ref.postcode == 'EH4 7EA'
+    assert str(ref) == 'Pgb:EH4_7EA'

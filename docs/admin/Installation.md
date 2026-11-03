@@ -4,10 +4,8 @@ This page contains generic installation instructions for Nominatim and its
 prerequisites. There are also step-by-step instructions available for
 the following operating systems:
 
-  * [Ubuntu 20.04](../appendix/Install-on-Ubuntu-20.md)
-  * [Ubuntu 18.04](../appendix/Install-on-Ubuntu-18.md)
-  * [CentOS 8](../appendix/Install-on-Centos-8.md)
-  * [CentOS 7.2](../appendix/Install-on-Centos-7.md)
+  * [Ubuntu 24.04](Install-on-Ubuntu-24.md)
+  * [Ubuntu 22.04](Install-on-Ubuntu-22.md)
 
 These OS-specific instructions can also be found in executable form
 in the `vagrant/` directory.
@@ -17,42 +15,44 @@ and can't offer support.
 
   * [Docker](https://github.com/mediagis/nominatim-docker)
   * [Docker on Kubernetes](https://github.com/peter-evans/nominatim-k8s)
+  * [Kubernetes with Helm](https://github.com/robjuz/helm-charts/blob/master/charts/nominatim/README.md)
   * [Ansible](https://github.com/synthesio/infra-ansible-nominatim)
 
 ## Prerequisites
 
 ### Software
 
-For compiling:
-
-  * [cmake](https://cmake.org/)
-  * [expat](https://libexpat.github.io/)
-  * [proj](https://proj.org/)
-  * [bzip2](http://www.bzip.org/)
-  * [zlib](https://www.zlib.net/)
-  * [ICU](http://site.icu-project.org/)
-  * [Boost libraries](https://www.boost.org/), including system and filesystem
-  * PostgreSQL client libraries
-  * a recent C++ compiler (gcc 5+ or Clang 3.8+)
-
 For running Nominatim:
 
-  * [PostgreSQL](https://www.postgresql.org) (9.3+ will work, 11+ strongly recommended)
-  * [PostGIS](https://postgis.net) (2.2+)
-  * [Python 3](https://www.python.org/) (3.5+)
-  * [Psycopg2](https://www.psycopg.org) (2.7+)
+  * [PostgreSQL](https://www.postgresql.org) (13+)
+  * [PostGIS](https://postgis.net) (3.0+ will work, 3.2+ strongly recommended)
+  * [osm2pgsql](https://osm2pgsql.org) (1.8+)
+  * [Python 3](https://www.python.org/) (3.9+, 3.10+ in case of Windows)
+
+Furthermore the following Python libraries are required:
+
+  * [Psycopg3](https://www.psycopg.org)
   * [Python Dotenv](https://github.com/theskumar/python-dotenv)
   * [psutil](https://github.com/giampaolo/psutil)
   * [Jinja2](https://palletsprojects.com/p/jinja/)
   * [PyICU](https://pypi.org/project/PyICU/)
-  * [PHP](https://php.net) (7.0 or later)
-  * PHP-pgsql
-  * PHP-intl (bundled with PHP)
-  * PHP-cgi (for running queries from the command line)
+  * [PyYaml](https://pyyaml.org/) (5.1+)
+  * [mwparserfromhell](https://github.com/earwig/mwparserfromhell/)
+
+These will be installed automatically when using pip installation.
 
 For running continuous updates:
 
   * [pyosmium](https://osmcode.org/pyosmium/)
+
+For running the Python frontend:
+
+  * [SQLAlchemy](https://www.sqlalchemy.org/) (1.4.31+, below 2.1, with greenlet support)
+  * [asyncpg](https://magicstack.github.io/asyncpg) (0.8+, only when using SQLAlchemy < 2.0)
+  * one of the following web frameworks:
+    * [falcon](https://falconframework.org/) (3.0+)
+    * [starlette](https://www.starlette.io/)
+  * [uvicorn](https://www.uvicorn.org/)
 
 For dependencies for running tests and building documentation, see
 the [Development section](../develop/Development-Environment.md).
@@ -60,15 +60,15 @@ the [Development section](../develop/Development-Environment.md).
 ### Hardware
 
 A minimum of 2GB of RAM is required or installation will fail. For a full
-planet import 64GB of RAM or more are strongly recommended. Do not report
+planet import 128GB of RAM or more are strongly recommended. Do not report
 out of memory problems if you have less than 64GB RAM.
 
-For a full planet install you will need at least 900GB of hard disk space.
+For a full planet install you will need at least 1TB of hard disk space.
 Take into account that the OSM database is growing fast.
 Fast disks are essential. Using NVME disks is recommended.
 
 Even on a well configured machine the import of a full planet takes
-around 2 days. On traditional spinning disks, 7-8 days are more realistic.
+around 2.5 days. When using traditional SSDs, 4-5 days are more realistic.
 
 ## Tuning the PostgreSQL database
 
@@ -80,15 +80,16 @@ your `postgresql.conf` file.
     maintenance_work_mem = (10GB)
     autovacuum_work_mem = 2GB
     work_mem = (50MB)
-    effective_cache_size = (24GB)
     synchronous_commit = off
-    checkpoint_segments = 100 # only for postgresql <= 9.4
-    max_wal_size = 1GB # postgresql > 9.4
-    checkpoint_timeout = 10min
+    max_wal_size = 1GB
+    checkpoint_timeout = 60min
     checkpoint_completion_target = 0.9
+    random_page_cost = 1.0
+    wal_level = minimal
+    max_wal_senders = 0
 
 The numbers in brackets behind some parameters seem to work fine for
-64GB RAM machine. Adjust to your setup. A higher number for `max_wal_size`
+128GB RAM machine. Adjust to your setup. A higher number for `max_wal_size`
 means that PostgreSQL needs to run checkpoints less often but it does require
 the additional space on your disk.
 
@@ -101,14 +102,14 @@ you might consider setting:
 and even reduce `autovacuum_work_mem` further. This will reduce the amount
 of memory that autovacuum takes away from the import process.
 
-For the initial import, you should also set:
+## Installing the latest release
 
-    fsync = off
-    full_page_writes = off
+Nominatim is easiest installed directly from Pypi. Make sure you have installed
+osm2pgsql, PostgreSQL/PostGIS and libICU together with its header files.
 
-Don't forget to reenable them after the initial import or you risk database
-corruption.
+Then you can install Nominatim with:
 
+    pip install nominatim-db nominatim-api
 
 ## Downloading and building Nominatim
 
@@ -119,45 +120,28 @@ The release contains all necessary files. Just unpack it.
 
 ### Downloading the latest development version
 
-If you want to install latest development version from github, make sure to
-also check out the osm2pgsql subproject:
+If you want to install latest development version from github:
 
 ```
-git clone --recursive git://github.com/openstreetmap/Nominatim.git
+git clone https://github.com/osm-search/Nominatim.git
 ```
 
 The development version does not include the country grid. Download it separately:
 
 ```
-wget -O Nominatim/data/country_osm_grid.sql.gz https://www.nominatim.org/data/country_grid.sql.gz
+wget -O Nominatim/data/country_osm_grid.sql.gz https://nominatim.org/data/country_grid.sql.gz
 ```
 
 ### Building Nominatim
 
-The code must be built in a separate directory. Create the directory and
-change into it.
+Nominatim is easiest to run from its own virtual environment. To create one, run:
 
-```
-mkdir build
-cd build
-```
+    sudo apt-get install virtualenv
+    virtualenv /srv/nominatim-venv
 
-Nominatim uses cmake and make for building. Assuming that you have created the
-build at the same level as the Nominatim source directory run:
+To install Nominatim directly from the source tree into the virtual environment, run:
 
-```
-cmake ../Nominatim
-make
-sudo make install
-```
+    /srv/nominatim-venv/bin/pip install packaging/nominatim-{db,api}
 
-Nominatim installs itself into `/usr/local` per default. To choose a different
-installation directory add `-DCMAKE_INSTALL_PREFIX=<install root>` to the
-cmake command. Make sure that the `bin` directory is available in your path
-in that case, e.g.
-
-```
-export PATH=<install root>/bin:$PATH
-```
 
 Now continue with [importing the database](Import.md).

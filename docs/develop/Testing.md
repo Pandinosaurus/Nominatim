@@ -8,9 +8,9 @@ the tests, see the [Development setup chapter](Development-Environment.md).
 
 There are two kind of tests in this test suite. There are functional tests
 which test the API interface using a BDD test framework and there are unit
-tests for specific PHP functions.
+tests for the Python code.
 
-This test directory is sturctured as follows:
+This test directory is structured as follows:
 
 ```
  -+-   bdd         Functional API tests
@@ -20,27 +20,10 @@ This test directory is sturctured as follows:
   | +-  db         Tests for internal data processing on import and update
   | +-  api        Tests for API endpoints (search, reverse, etc.)
   |
-  +-   php         PHP unit tests
   +-   python      Python unit tests
-  +-   scenes      Geometry test data
   +-   testdb      Base data for generating API test database
+  +-   testdata    Additional test data used by unit tests
 ```
-
-## PHP Unit Tests (`test/php`)
-
-Unit tests for PHP code can be found in the `php/` directory. They test selected
-PHP functions. Very low coverage.
-
-To execute the test suite run
-
-    cd test/php
-    UNIT_TEST_DSN='pgsql:dbname=nominatim_unit_tests' phpunit ../
-
-It will read phpunit.xml which points to the library, test path, bootstrap
-strip and sets other parameters.
-
-It will use (and destroy) a local database 'nominatim_unit_tests'. You can set
-a different connection string with e.g. UNIT_TEST_DSN='pgsql:dbname=foo_unit_tests'.
 
 ## Python Unit Tests (`test/python`)
 
@@ -60,54 +43,62 @@ The name of the pytest binary depends on your installation.
 ## BDD Functional Tests (`test/bdd`)
 
 Functional tests are written as BDD instructions. For more information on
-the philosophy of BDD testing, see the
-[Behave manual](http://pythonhosted.org/behave/philosophy.html).
-
-The following explanation assume that the reader is familiar with the BDD
-notations of features, scenarios and steps.
-
-All possible steps can be found in the `steps` directory and should ideally
-be documented.
+the philosophy of BDD testing, read the Wikipedia article on
+[Behaviour-driven development](https://en.wikipedia.org/wiki/Behavior-driven_development).
 
 ### General Usage
 
 To run the functional tests, do
 
-    cd test/bdd
-    behave
+    pytest test/bdd
 
-The tests can be configured with a set of environment variables (`behave -D key=val`):
+You can run a single feature file using expression matching:
 
- * `BUILDDIR` - build directory of Nominatim installation to test
- * `TEMPLATE_DB` - name of template database used as a skeleton for
-                   the test databases (db tests)
- * `TEST_DB` - name of test database (db tests)
- * `API_TEST_DB` - name of the database containing the API test data (api tests)
- * `API_TEST_FILE` - OSM file to be imported into the API test database (api tests)
- * `DB_HOST` - (optional) hostname of database host
- * `DB_PORT` - (optional) port of database on host
- * `DB_USER` - (optional) username of database login
- * `DB_PASS` - (optional) password for database login
- * `SERVER_MODULE_PATH` - (optional) path on the Postgres server to Nominatim
-                          module shared library file
- * `REMOVE_TEMPLATE` - if true, the template and API database will not be reused
-                       during the next run. Reusing the base templates speeds
-                       up tests considerably but might lead to outdated errors
-                       for some changes in the database layout.
- * `KEEP_TEST_DB` - if true, the test database will not be dropped after a test
-                    is finished. Should only be used if one single scenario is
-                    run, otherwise the result is undefined.
+    pytest test/bdd -k osm2pgsql/import/entrances.feature
 
-Logging can be defined through command line parameters of behave itself. Check
-out `behave --help` for details. Also have a look at the 'work-in-progress'
-feature of behave which comes in handy when writing new tests.
+This even works for running single tests by adding the line number of the
+scenario header like that:
+
+    pytest test/bdd -k 'osm2pgsql/import/entrances.feature and L4'
+
+The BDD tests create databases for the tests. You can set name of the databases
+through configuration variables in your `pytest.ini`:
+
+ * `nominatim_test_db` defines the name of the temporary database created for
+    a single test (default: `test_nominatim`)
+ * `nominatim_api_test_db` defines the name of the database containing
+    the API test data, see also below (default: `test_api_nominatim`)
+ * `nominatim_template_db` defines the name of the template database used
+    for creating the temporary test databases. It contains some static setup
+    which usually doesn't change between imports of OSM data
+    (default: `test_template_nominatim`)
+
+To change other connection parameters for the PostgreSQL database, use
+the [libpq environment variables](https://www.postgresql.org/docs/current/libpq-envars.html).
+Never set a password through these variables. Use a
+[password file](https://www.postgresql.org/docs/current/libpq-pgpass.html) instead.
+
+The API test database and the template database are only created once and then
+left untouched. This is usually what you want because it speeds up subsequent
+runs of BDD tests. If you do change code that has an influence on the content
+of these databases, you can run pytest with the `--nominatim-purge` parameter
+and the databases will be dropped and recreated from scratch.
+
+When running the BDD tests with make (using `make tests` or `make bdd`), then
+the databases will always be purged.
+
+The temporary test database is usually dropped directly after the test, so
+it does not take up unnecessary space. If you want to keep the database around,
+for example while debugging a specific BDD test, use the parameter
+`--nominatim-keep-db`.
+
 
 ### API Tests (`test/bdd/api`)
 
 These tests are meant to test the different API endpoints and their parameters.
 They require to import several datasets into a test database. This is normally
 done automatically during setup of the test. The API test database is then
-kept around and reused in subsequent runs of behave. Use `behave -DREMOVE_TEMPLATE`
+kept around and reused in subsequent runs of behave. Use `--nominatim-purge`
 to force a reimport of the database.
 
 The official test dataset is saved in the file `test/testdb/apidb-test-data.pbf`
@@ -117,25 +108,8 @@ and compromises the following data:
  * extract of Autauga country, Alabama, US (for tests against Tiger data)
  * additional data from `test/testdb/additional_api_test.data.osm`
 
-API tests should only be testing the functionality of the website PHP code.
+API tests should only be testing the functionality of the website frontend code.
 Most tests should be formulated as BDD DB creation tests (see below) instead.
-
-#### Code Coverage
-
-The API tests also support code coverage tests. You need to install
-[PHP_CodeCoverage](https://github.com/sebastianbergmann/php-code-coverage).
-On Debian/Ubuntu run:
-
-    apt-get install php-codecoverage php-xdebug
-
-Then run the API tests as follows:
-
-    behave api -DPHPCOV=<coverage output dir>
-
-The output directory must be an absolute path. To generate reports, you can use
-the [phpcov](https://github.com/sebastianbergmann/phpcov) tool:
-
-    phpcov merge --html=<report output dir> <coverage output dir>
 
 ### DB Creation Tests (`test/bdd/db`)
 
@@ -144,16 +118,12 @@ test the correctness of osm2pgsql. Each test will write some data into the `plac
 table (and optionally the `planet_osm_*` tables if required) and then run
 Nominatim's processing functions on that.
 
-These tests need to create their own test databases. By default they will be
-called `test_template_nominatim` and `test_nominatim`. Names can be changed with
-the environment variables `TEMPLATE_DB` and `TEST_DB`. The user running the tests
-needs superuser rights for postgres.
+These tests use the template database and create temporary test databases for
+each test.
 
 ### Import Tests (`test/bdd/osm2pgsql`)
 
-These tests check that data is imported correctly into the place table. They
-use the same template database as the DB Creation tests, so the same remarks apply.
+These tests check that data is imported correctly into the place table.
 
-Note that most testing of the gazetteer output of osm2pgsql is done in the tests
-of osm2pgsql itself. The BDD tests are just there to ensure compatibility of
-the osm2pgsql and Nominatim code.
+These tests also use the template database and create temporary test databases
+for each test.

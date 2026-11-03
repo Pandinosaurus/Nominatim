@@ -1,0 +1,353 @@
+Feature: Tag evaluation
+    Tests if tags are correctly imported into the place table
+
+    Scenario: Main tags as fallback
+        When loading osm data
+            """
+            n100 Tjunction=yes,highway=bus_stop
+            n101 Tjunction=yes,name=Bar
+            n200 Tbuilding=yes,amenity=cafe
+            n201 Tbuilding=yes,name=Intersting
+            n202 Tbuilding=yes
+            n203 Tbuilding=yes,addr:housenumber=1
+            n204 Tbuilding=yes,landuse=retail,name=Two
+            """
+        Then place contains exactly
+            | object | class    | type     | categories!set                             |
+            | N100   | highway  | bus_stop | 'osm.highway.bus_stop'                     |
+            | N101   | junction | yes      | 'osm.junction.yes'                         |
+            | N200   | amenity  | cafe     | 'osm.amenity.cafe'                         |
+            | N201   | building | yes      | 'osm.building.yes'                         |
+            | N203   | building | yes      | 'osm.building.yes'                         |
+            | N204   | building | yes      | 'osm.building.yes', 'osm.landuse.retail'   |
+
+
+    Scenario: Name and reg tags
+        When loading osm data
+            """
+            n2001 Thighway=road,name=Foo,alt_name:de=Bar,ref=45
+            n2002 Thighway=road,name:full=Full,ref:de=55
+            n2003 Thighway=yes,name:%20%de=Foo,name=real1
+            n2004 Thighway=yes,name:%a%de=Foo,name=real2
+            n2005 Thighway=yes,name:%9%de=Foo,name:\\=real3
+            n2006 Thighway=yes,name:%9%de=Foo,name=rea\l3
+            """
+        Then place contains exactly
+            | object | class   | type | name!dict |
+            | N2001  | highway | road | 'name': 'Foo', 'alt_name:de': 'Bar', 'ref': '45' |
+            | N2002  | highway | road | - |
+            | N2003  | highway | yes  | 'name: de': 'Foo', 'name': 'real1' |
+            | N2004  | highway | yes  | 'name:\\nde': 'Foo', 'name': 'real2' |
+            | N2005  | highway | yes  | 'name:\tde': 'Foo', r'name:\\\\': 'real3' |
+            | N2006  | highway | yes  | 'name:\tde': 'Foo', 'name': r'rea\l3' |
+
+        And place contains
+            | object | extratags!dict |
+            | N2002  | 'name:full': 'Full', 'ref:de': '55' |
+
+
+    Scenario: Name when using with_name flag
+        When loading osm data
+            """
+            n3001 Tbridge=yes,bridge:name=GoldenGate
+            n3002 Tbridge=yes,bridge:name:en=Rainbow
+            """
+        Then place contains exactly
+            | object | class   | type | name!dict            |
+            | N3001  | bridge  | yes  | 'name': 'GoldenGate' |
+            | N3002  | bridge  | yes  | 'name:en': 'Rainbow' |
+
+
+    Scenario: Address tags
+        When loading osm data
+            """
+            n4001 Taddr:housenumber=34,addr:city=Esmarald,addr:county=Land
+            n4002 Taddr:streetnumber=10,is_in:city=Rootoo,is_in=Gold
+            """
+        Then place contains exactly
+            | object | class | address!dict |
+            | N4001  | place | 'housenumber': '34', 'city': 'Esmarald', 'county': 'Land' |
+            | N4002  | place | 'streetnumber': '10', 'city': 'Rootoo' |
+
+
+    Scenario: addr:substreet is an alias for addr:place
+        When loading osm data
+            """
+            n41 Taddr:housenumber=34,addr:substreet=Bow%20%Terrace,addr:parentstreet=Main%20%Road
+            """
+        Then place contains exactly
+            | object | class | address!dict |
+            | N41    | place | 'housenumber': '34', 'place': 'Bow Terrace', 'parentstreet': 'Main Road' |
+
+
+     Scenario: Country codes
+        When loading osm data
+            """
+            n5001 Tshop=yes,country_code=DE
+            n5002 Tshop=yes,country_code=toolong
+            n5003 Tshop=yes,country_code=x
+            n5004 Tshop=yes,addr:country=us
+            n5005 Tshop=yes,country=be
+            n5006 Tshop=yes,addr:country=France
+            """
+        Then place contains exactly
+            | object | class | address!dict    |
+            | N5001  | shop  | 'country': 'DE' |
+            | N5002  | shop  | - |
+            | N5003  | shop  | - |
+            | N5004  | shop  | 'country': 'us' |
+            | N5005  | shop  | - |
+            | N5006  | shop  | - |
+
+
+    Scenario: Postcodes
+        When loading osm data
+            """
+            n6001 Tshop=bank,addr:postcode=12345
+            n6002 Tshop=bank,tiger:zip_left=34343
+            n6003 Tshop=bank,is_in:postcode=9009
+            n6004 Taddr:postcode=54322
+            """
+        Then place contains exactly
+            | object | class | address!dict        |
+            | N6001  | shop  | 'postcode': '12345' |
+            | N6002  | shop  | 'postcode': '34343' |
+            | N6003  | shop  | -                   |
+        And place_postcode contains exactly
+            | object | postcode | geometry |
+            | N6004  | 54322    | -        |
+
+
+    Scenario: Postcode areas
+        When loading osm data
+            """
+            n1 x12.36853 y51.50618
+            n2 x12.36853 y51.42362
+            n3 x12.63666 y51.42362
+            n4 x12.63666 y51.50618
+            w1 Nn1,n2,n3,n4,n1
+            w2 Tboundary=postal_code,postal_code=443 Nn1,n2,n3,n4,n1
+            r1 Ttype=boundary,boundary=postal_code,postal_code=3456 Mw1@
+            """
+        Then place contains exactly
+            | object |
+        And place_postcode contains exactly
+            | object | postcode | geometry!wkt |
+            | R1     | 3456     | (12.36853 51.50618, 12.36853 51.42362, 12.63666 51.42362, 12.63666 51.50618, 12.36853 51.50618) |
+
+    Scenario: Main with extra
+        When loading osm data
+            """
+            n7001 Thighway=primary,bridge=yes,name=1
+            n7002 Thighway=primary,bridge=yes,bridge:name=1
+            """
+        Then place contains exactly
+            | object | class   | type    | name!dict   | extratags!dict          | categories!set                               |
+            | N7001  | highway | primary | 'name': '1' | 'bridge': 'yes'                | 'osm.highway.primary'                        |
+            | N7002  | bridge  | yes     | 'name': '1' | 'highway': 'primary', 'bridge:name': '1' | 'osm.bridge.yes', 'osm.highway.primary'      |
+
+
+    Scenario: Categories are populated and merged for main tags
+        When loading osm data
+            """
+            n7101 Ttourism=hotel,amenity=restaurant,name=foo
+            n7102 Tamenity=vending-machine
+            n7103 Tamenity=foo/bar
+            n7104 Tboundary=administrative,place=city,name=A
+            """
+        Then place contains exactly
+            | object | categories!set                                   |
+            | N7101  | 'osm.tourism.hotel', 'osm.amenity.restaurant'    |
+            | N7102  | 'osm.amenity.vending_machine'                    |
+            | N7103  | 'osm.amenity.yes'                                |
+            | N7104  | 'osm.boundary.administrative', 'osm.place.city'  |
+
+
+    Scenario: Global fallback and skipping
+        When loading osm data
+            """
+            n8001 Tshop=shoes,note:de=Nein,xx=yy
+            n8002 Tshop=shoes,natural=no,ele=234
+            n8003 Tshop=shoes,name:source=survey
+            """
+        Then place contains exactly
+            | object | class | name!dict | extratags!dict |
+            | N8001  | shop  |  -        | 'xx': 'yy'   |
+            | N8002  | shop  |  -        | 'ele': '234' |
+            | N8003  | shop  |  -        | -            |
+
+
+    Scenario: Admin levels
+        When loading osm data
+            """
+            n9001 Tplace=city
+            n9002 Tplace=city,admin_level=16
+            n9003 Tplace=city,admin_level=x
+            n9004 Tplace=city,admin_level=1
+            n9005 Tplace=city,admin_level=0
+            n9006 Tplace=city,admin_level=2.5
+            """
+        Then place contains exactly
+            | object | class | admin_level |
+            | N9001  | place | 15          |
+            | N9002  | place | 15          |
+            | N9003  | place | 15          |
+            | N9004  | place | 1           |
+            | N9005  | place | 15          |
+            | N9006  | place | 15          |
+
+
+    Scenario: Administrative boundaries with place tags
+        When loading osm data
+            """
+            n10001 Tboundary=administrative,place=city,name=A
+            n10002 Tboundary=natural,place=city,name=B
+            n10003 Tboundary=administrative,place=island,name=C
+            """
+        Then place contains
+            | object | class    | type           | categories!set                                    |
+            | N10001 | boundary | administrative | 'osm.boundary.administrative', 'osm.place.city'   |
+        And place contains
+            | object | class    | type           | categories!set                                    |
+            | N10002 | boundary | natural        | 'osm.boundary.natural', 'osm.place.city'          |
+            | N10003 | boundary | administrative | 'osm.boundary.administrative', 'osm.place.island' |
+
+
+    Scenario: Building fallbacks
+        When loading osm data
+            """
+            n12001 Ttourism=hotel,building=yes
+            n12002 Tbuilding=house
+            n12003 Tbuilding=shed,addr:housenumber=1
+            n12004 Tbuilding=yes,name=Das-Haus
+            n12005 Tbuilding=yes,addr:postcode=12345
+            """
+        Then place contains exactly
+            | object | class    | type     |
+            | N12001 | tourism  | hotel    |
+            | N12003 | building | shed     |
+            | N12004 | building | yes      |
+        And place_postcode contains exactly
+            | object | postcode | geometry |
+            | N12005 | 12345    | -        |
+
+
+    Scenario: Footways
+        When loading osm data
+            """
+            n1 x0.0 y0.0
+            n2 x0 y0.0001
+            w1 Thighway=footway Nn1,n2
+            w2 Thighway=footway,name=Road Nn1,n2
+            w3 Thighway=footway,name=Road,footway=sidewalk Nn1,n2
+            w4 Thighway=footway,name=Road,footway=crossing Nn1,n2
+            w5 Thighway=footway,name=Road,footway=residential Nn1,n2
+            """
+        Then place contains exactly
+            | object | name+name |
+            | W2     | Road      |
+            | W5     | Road      |
+
+
+    Scenario: Tourism information
+        When loading osm data
+            """
+            n100 Ttourism=information
+            n101 Ttourism=information,name=Generic
+            n102 Ttourism=information,information=guidepost
+            n103 Thighway=information,information=house
+            n104 Ttourism=information,information=yes,name=Something
+            n105 Ttourism=information,information=route_marker,name=3
+            """
+        Then place contains exactly
+            | object | class       | type        |
+            | N100   | tourism     | information |
+            | N101   | tourism     | information |
+            | N102   | information | guidepost   |
+            | N103   | highway     | information |
+            | N104   | tourism     | information |
+
+
+    Scenario: Water features
+        When loading osm data
+            """
+            n20 Tnatural=water
+            n21 Tnatural=water,name=SomePond
+            n22 Tnatural=water,water=pond
+            n23 Tnatural=water,water=pond,name=Pond
+            n24 Tnatural=water,water=river,name=BigRiver
+            n25 Tnatural=water,water=yes
+            n26 Tnatural=water,water=yes,name=Random
+            """
+        Then place contains exactly
+            | object | class   | type  |
+            | N21    | natural | water |
+            | N23    | water   | pond  |
+            | N26    | natural | water |
+
+    Scenario: Drop name for address fallback
+        When loading osm data
+            """
+            n1 Taddr:housenumber=23,name=Foo
+            n2 Taddr:housenumber=23,addr:housename=Foo
+            n3 Taddr:housenumber=23
+            """
+        Then place contains exactly
+            | object | class | type  | address!dict        | name!dict               | categories |
+            | N1     | place | house | 'housenumber': '23' | -                       | -          |
+            | N2     | place | house | 'housenumber': '23' | 'addr:housename': 'Foo' | -          |
+            | N3     | place | house | 'housenumber': '23' | -                       | -          |
+
+
+    Scenario: Waterway locks
+        When loading osm data
+            """
+            n1 Twaterway=river,lock=yes
+            n2 Twaterway=river,lock=yes,lock_name=LeLock
+            n3 Twaterway=river,lock=yes,name=LeWater
+            n4 Tamenity=parking,lock=yes,lock_name=Gold
+            """
+        Then place contains exactly
+            | object | class    | type    | name!dict |
+            | N2     | lock     | yes     | 'name': 'LeLock' |
+            | N3     | waterway | river   | 'name': 'LeWater' |
+            | N4     | amenity  | parking | - |
+
+
+    Scenario: Categories populate on place table for single and multi-tag
+        When loading osm data
+            """
+            n1 Tamenity=restaurant,name=Foo
+            n2 Ttourism=hotel,amenity=cafe,name=Bar
+            """
+        Then place contains exactly
+          | object | categories!set                          |
+          | N1     | 'osm.amenity.restaurant'                |
+          | N2     | 'osm.tourism.hotel', 'osm.amenity.cafe' |
+
+
+    Scenario: Categories sanitize non-alphanumeric class/type values
+        When loading osm data
+            """
+            n1 Tamenity=3stars
+            n2 Tshop=3for2
+            n3 Tamenity=fast-food
+            n4 Tshop=do-it-yourself
+            """
+        Then place contains exactly
+          | object | categories!set            |
+          | N1     | 'osm.amenity.3stars'      |
+          | N2     | 'osm.shop.3for2'          |
+          | N3     | 'osm.amenity.fast_food'   |
+          | N4     | 'osm.shop.do_it_yourself' |
+
+    Scenario: Category fallback for unrecognized values uses 'yes'
+        When loading osm data
+            """
+            n8101 Tamenity=???
+            n8102 Tshop=????
+            """
+        Then place contains exactly
+          |object|categories!set|
+          |N8101|'osm.amenity.yes'|
+          |N8102|'osm.shop.yes'|

@@ -1,0 +1,105 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# This file is part of Nominatim. (https://nominatim.org)
+#
+# Copyright (C) 2026 by the Nominatim developer community.
+# For a full list of authors see the git log.
+"""
+This sanitizer sets the `analyzer` property depending on the
+language of the tag. The language is taken from the suffix of the name.
+If a name already has an analyzer tagged, then this is kept.
+
+Arguments:
+    type: Define which type of names should be considered for language tagging:
+          proper names of the object ('name') or names defining the address
+          ('address'). (default: 'name')
+    filter-kind: Restrict the names the sanitizer should be applied to
+                 the given tags. The parameter expects a list of
+                 regular expressions which are matched against 'kind'.
+                 Note that a match against the full string is expected.
+    whitelist: Restrict the set of languages that should be tagged.
+               Expects a list of acceptable suffixes. When unset,
+               all 2- and 3-letter lower-case codes are accepted.
+    suffix-ignore: List of suffixes that are not language-related. Names
+                   with a suffix from that list will be handled like a name
+                   without suffix. (default: empty)
+    use-defaults:  Configure what happens when the name has no suffix.
+                   When set to 'all', a variant is created for
+                   each of the default languages in the country
+                   the feature is in. When set to 'mono', a variant is
+                   only created, when exactly one language is spoken
+                   in the country. The default is to do nothing with
+                   the default languages of a country.
+    mode: Define how the variants are created and may be 'replace' or
+          'append'. When set to 'append' the original name (without
+          any analyzer tagged) is retained. (default: replace)
+    attribute: Attribute which will be set. (default: analyzer)
+
+"""
+from typing import Callable, Dict, Optional, List
+
+from ...data import country_info
+from .base import ProcessInfo, SanitizerFunc
+from .config import SanitizerConfig
+
+
+class _AnalyzerByLanguage:
+    """ Processor for tagging the language of names in a place.
+    """
+
+    def __init__(self, config: SanitizerConfig) -> None:
+        self.name_type = config.get('type', 'name')
+        self.filter_kind = config.get_filter('filter-kind')
+        self.replace = config.get('mode', 'replace') != 'append'
+        self.suffix_ignore = set(config.get_string_list('suffix-ignore'))
+        self.out_attribute = str(config.get('attribute', 'analyzer'))
+        whitelist = config.get('whitelist')
+        self.suffix_matcher: Callable[[str], bool]
+        if whitelist is None:
+            self.suffix_matcher = lambda s: len(s) in (2, 3) and s.islower()
+        else:
+            self.suffix_matcher = lambda s: s in whitelist
+
+        self._compute_default_languages(config.get('use-defaults', 'no'), whitelist)
+
+    def _compute_default_languages(self, use_defaults: str, whitelist: Optional[list[str]]) -> None:
+        self.deflangs: Dict[Optional[str], List[str]] = {}
+
+        if use_defaults in ('mono', 'all'):
+            for ccode, clangs in country_info.iterate('languages'):
+                if len(clangs) == 1 or use_defaults == 'all':
+                    if whitelist:
+                        self.deflangs[ccode] = [cl for cl in clangs if cl in whitelist]
+                    else:
+                        self.deflangs[ccode] = clangs
+
+    def __call__(self, obj: ProcessInfo) -> None:
+        to_process = obj.names if self.name_type == 'name' else obj.address
+        if not to_process:
+            return
+
+        more_names = []
+
+        for name in (n for n in to_process
+                     if not n.has_attr(self.out_attribute) and self.filter_kind(n.kind)):
+            if name.suffix and name.suffix not in self.suffix_ignore:
+                langs = [name.suffix] if self.suffix_matcher(name.suffix) else None
+            else:
+                langs = self.deflangs.get(obj.place.country_code)
+
+            if langs:
+                if self.replace:
+                    name.set_attr(self.out_attribute, langs[0])
+                else:
+                    more_names.append(name.clone(attr={self.out_attribute: langs[0]}))
+
+                more_names.extend(name.clone(attr={self.out_attribute: lg}) for lg in langs[1:])
+
+        to_process.extend(more_names)
+
+
+def create(config: SanitizerConfig) -> SanitizerFunc:
+    """ Create a function that sets the analyzer property depending on the
+        language of the tag.
+    """
+    return _AnalyzerByLanguage(config)

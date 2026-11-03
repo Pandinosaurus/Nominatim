@@ -1,0 +1,369 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# This file is part of Nominatim. (https://nominatim.org)
+#
+# Copyright (C) 2025 by the Nominatim developer community.
+# For a full list of authors see the git log.
+"""
+Public interface to the search code.
+"""
+from typing import List, Any, Optional, Iterator, Tuple, Dict
+import itertools
+import re
+import difflib
+
+import sqlalchemy as sa
+
+from ..connection import SearchConnection
+from ..types import PlaceRef, SearchDetails, PlaceID, OsmID, PostcodeRef
+from ..results import SearchResult, SearchResults, add_result_details
+from ..timeout import Timeout
+from ..logging import log
+from .token_assignment import yield_token_assignments
+from .db_search_builder import SearchBuilder, build_poi_search, wrap_near_search
+from .db_searches import AbstractSearch
+from .query_analyzer_factory import make_query_analyzer, AbstractQueryAnalyzer
+from .query_preprocessor import QueryPreprocessor
+from .query import Phrase, QueryStruct
+
+
+class ForwardGeocoder:
+    """ Main class responsible for place search.
+    """
+
+    def __init__(self, conn: SearchConnection,
+                 params: SearchDetails, timeout: Timeout) -> None:
+        self.conn = conn
+        self.params = params
+        self.timeout = timeout
+        self.query_preprocessor = QueryPreprocessor(self.conn.config)
+        self.query_analyzer: Optional[AbstractQueryAnalyzer] = None
+
+    @property
+    def limit(self) -> int:
+        """ Return the configured maximum number of search results.
+        """
+        return self.params.max_results
+
+    async def _resolve_excluded_osm_ids(self) -> None:
+        """ Resolve any OsmID entries in the excluded list to PlaceID entries
+            by looking them up in the placex and location_postcode table.
+        """
+        excluded = self.params.excluded
+        if not excluded or all(isinstance(e, PlaceID) for e in excluded):
+            return
+
+        place_ids: List[PlaceRef] = [e for e in excluded if isinstance(e, PlaceID)]
+        osm_ids = [e for e in excluded if isinstance(e, OsmID)]
+        postcode_refs = [e for e in excluded if isinstance(e, PostcodeRef)]
+
+        if postcode_refs:
+            p = self.conn.t.postcode
+            conditions = [
+                sa.and_(p.c.osm_id.is_(None),
+                        p.c.country_code == ref.country_code,
+                        p.c.postcode == ref.postcode)
+                for ref in postcode_refs
+            ]
+            sql = sa.select(p.c.place_id).where(sa.or_(*conditions))
+            place_ids.extend(PlaceID(row.place_id)
+                             for row in await self.conn.execute(sql))
+
+        if osm_ids:
+            t = self.conn.t.placex
+            conditions = [
+                sa.and_(t.c.osm_type == oid.osm_type, t.c.osm_id == oid.osm_id)
+                for oid in osm_ids
+            ]
+            sql = sa.select(t.c.place_id).where(sa.or_(*conditions))
+            place_ids.extend(PlaceID(row.place_id)
+                             for row in await self.conn.execute(sql))
+
+            relation_ids = [oid.osm_id for oid in osm_ids if oid.osm_type == 'R']
+            if relation_ids:
+                p = self.conn.t.postcode
+                sql = sa.select(p.c.place_id).where(p.c.osm_id.in_(relation_ids))
+                place_ids.extend(PlaceID(row.place_id)
+                                 for row in await self.conn.execute(sql))
+
+        self.params.excluded = place_ids
+
+    async def build_searches(self,
+                             phrases: List[Phrase]) -> Tuple[QueryStruct, List[AbstractSearch]]:
+        """ Analyse the query and return the tokenized query and list of
+            possible searches over it.
+        """
+        if self.query_analyzer is None:
+            self.query_analyzer = await make_query_analyzer(self.conn)
+
+        query = await self.query_analyzer.analyze_query(self.query_preprocessor.run(phrases))
+        query.compute_direction_penalty()
+        log().var_dump('Query direction penalty',
+                       lambda: f"[{'LR' if query.dir_penalty < 0 else 'RL'}] {query.dir_penalty}")
+
+        searches: List[AbstractSearch] = []
+        if query.num_token_slots() > 0:
+            # 2. Compute all possible search interpretations
+            log().section('Compute abstract searches')
+            search_builder = SearchBuilder(query, self.params)
+            num_searches = 0
+            for assignment in yield_token_assignments(query):
+                searches.extend(search_builder.build(assignment))
+                if num_searches < len(searches):
+                    log().table_dump('Searches for assignment',
+                                     _dump_searches(searches, query, num_searches))
+                num_searches = len(searches)
+            searches.sort(key=lambda s: (s.penalty, s.SEARCH_PRIO))
+
+        return query, searches
+
+    async def execute_searches(self, query: QueryStruct,
+                               searches: List[AbstractSearch]) -> SearchResults:
+        """ Run the abstract searches against the database until a result
+            is found.
+        """
+        log().section('Execute database searches')
+        results: Dict[Any, SearchResult] = {}
+        qs = self.params.query_stats
+
+        qs['search_min_penalty'] = round(searches[0].penalty, 2)
+        min_ranking = searches[0].penalty + 1.5
+        prev_penalty = 0.0
+        for i, search in enumerate(searches):
+            if search.penalty > prev_penalty and (search.penalty > min_ranking or i > 15):
+                break
+            log().table_dump(f"{i + 1}. Search", _dump_searches([search], query))
+            log().var_dump('Params', self.params)
+            lookup_results = await search.lookup(self.conn, self.params)
+            for result in lookup_results:
+                rhash = (result.source_table, result.place_id,
+                         result.housenumber, result.country_code)
+                prevresult = results.get(rhash)
+                if prevresult:
+                    prevresult.accuracy = min(prevresult.accuracy, result.accuracy)
+                else:
+                    if not results:
+                        qs['search_first_result_round'] = i
+                    spenalty = round(search.penalty, 2)
+                    if 'search_min_result_penalty' not in qs or \
+                            spenalty < qs['search_min_result_penalty']:
+                        qs['search_min_result_penalty'] = spenalty
+                        qs['search_best_penalty_round'] = i
+                    results[rhash] = result
+                min_ranking = min(min_ranking,
+                                  search.penalty + 0.4,
+                                  result.accuracy + 0.1)
+            log().result_dump('Results', ((r.accuracy, r) for r in lookup_results))
+            prev_penalty = search.penalty
+            if self.timeout.is_elapsed():
+                break
+
+        qs['search_rounds'] = i + 1
+        return SearchResults(results.values())
+
+    def pre_filter_results(self, results: SearchResults) -> SearchResults:
+        """ Remove results that are significantly worse than the
+            best match.
+        """
+        if results:
+            max_ranking = min(r.ranking for r in results) + 0.5
+            results = SearchResults(r for r in results if r.ranking < max_ranking)
+
+        return results
+
+    def sort_and_cut_results(self, results: SearchResults) -> SearchResults:
+        """ Remove badly matching results, sort by ranking and
+            limit to the configured number of results.
+        """
+        if not results:
+            return results
+
+        results.sort(key=lambda r: (r.ranking, 0 if r.bbox is None else -r.bbox.area))
+
+        final = SearchResults()
+        min_rank = results[0].rank_search
+        min_ranking = results[0].ranking
+
+        for r in results:
+            if r.ranking + 0.03 * (r.rank_search - min_rank) < min_ranking + 0.5:
+                final.append(r)
+                min_rank = min(r.rank_search, min_rank)
+            if len(final) == self.limit:
+                break
+
+        return final
+
+    def _get_result_rerank_text(self, result: SearchResult) -> set[str]:
+        if not self.params.locales:
+            return {result.display_name} if result.display_name else set()
+
+        label_parts: set[str] = set()
+        if result.address_rows:
+            for line in result.address_rows:
+                if line.isaddress and line.names:
+                    address_name = self.params.locales.display_name(line.names)
+                    if address_name:
+                        label_parts.add(address_name)
+
+        if label_parts:
+            return label_parts
+
+        if result.names:
+            return {self.params.locales.display_name(result.names)}
+
+        return {result.display_name} if result.display_name else set()
+
+    def rerank_by_query(self, query: QueryStruct, results: SearchResults) -> None:
+        """ Adjust the accuracy of the localized result according to how well
+            they match the original query.
+        """
+        assert self.query_analyzer is not None
+        qwords = [word for phrase in query.source
+                  for word in re.split('[-,: ]+', phrase.text) if word]
+        if not qwords:
+            return
+        norm_query = self.query_analyzer.normalize_text(' '.join(qwords))
+
+        for result in results:
+            # Negative importance indicates ordering by distance, which is
+            # more important than word matching.
+            if not result.display_name\
+               or (result.importance is not None and result.importance < 0):
+                continue
+            distance = 0.0
+            # Use locale-aware text for word matching so that translated names
+            # (e.g., name:en) are included in the match pool.
+            rerank_text = self._get_result_rerank_text(result)
+            norm = self.query_analyzer.normalize_text(
+                ' '.join((*rerank_text, result.country_code or ''))
+            )
+            words = set((w for w in re.split('[-,: ]+', norm) if w))
+            if not words:
+                continue
+            for qword in qwords:
+                # only add distance penalty if there is no perfect match
+                if qword not in words:
+                    wdist = max(difflib.SequenceMatcher(a=qword, b=w).quick_ratio() for w in words)
+                    distance += len(qword) if wdist < 0.4 else 1
+            # Countries with high importance can dominate results when matched
+            # via an alternate-language name. Apply a language-aware penalty
+            # to offset this.
+            if result.rank_address == 4:
+                if self.params.locales and result.names:
+                    country_names = {self.query_analyzer.normalize_text(result.names[t])
+                                     for t in self.params.locales.name_tags
+                                     if t in result.names}
+                    if result.country_code:
+                        country_names.add(result.country_code)
+                    if norm_query not in country_names:
+                        result.accuracy += result.calculated_importance() * 0.5
+                else:
+                    distance *= 2
+            result.accuracy += distance * 0.3 / sum(len(w) for w in qwords)
+
+    async def lookup_pois(self, categories: List[Tuple[str, str]],
+                          phrases: List[Phrase]) -> SearchResults:
+        """ Look up places by category. If phrase is given, a place search
+            over the phrase will be executed first and places close to the
+            results returned.
+        """
+        log().function('forward_lookup_pois', categories=categories, params=self.params)
+
+        await self._resolve_excluded_osm_ids()
+
+        if phrases:
+            query, searches = await self.build_searches(phrases)
+
+            if searches:
+                searches = [wrap_near_search(categories, s) for s in searches[:50]]
+                results = await self.execute_searches(query, searches)
+                results = self.pre_filter_results(results)
+                await add_result_details(self.conn, results, self.params)
+                log().result_dump('Preliminary Results', ((r.accuracy, r) for r in results))
+                results = self.sort_and_cut_results(results)
+            else:
+                results = SearchResults()
+        else:
+            search = build_poi_search(categories, self.params.countries)
+            results = await search.lookup(self.conn, self.params)
+            await add_result_details(self.conn, results, self.params)
+
+        log().result_dump('Final Results', ((r.accuracy, r) for r in results))
+
+        return results
+
+    async def lookup(self, phrases: List[Phrase]) -> SearchResults:
+        """ Look up a single free-text query.
+        """
+        log().function('forward_lookup', phrases=phrases, params=self.params)
+        results = SearchResults()
+
+        if self.params.is_impossible():
+            return results
+
+        await self._resolve_excluded_osm_ids()
+
+        query, searches = await self.build_searches(phrases)
+
+        if searches:
+            # Execute SQL until an appropriate result is found.
+            results = await self.execute_searches(query, searches[:50])
+            results = self.pre_filter_results(results)
+            await add_result_details(self.conn, results, self.params)
+            log().result_dump('Preliminary Results', ((r.accuracy, r) for r in results))
+            if len(results) > 1:
+                self.rerank_by_query(query, results)
+                log().result_dump('Results after reranking', ((r.accuracy, r) for r in results))
+                results = self.sort_and_cut_results(results)
+            log().result_dump('Final Results', ((r.accuracy, r) for r in results))
+
+        return results
+
+
+def _dump_searches(searches: List[AbstractSearch], query: QueryStruct,
+                   start: int = 0) -> Iterator[Optional[List[Any]]]:
+    yield ['Penalty', 'Lookups', 'Housenr', 'Postcode', 'Countries',
+           'Qualifier', 'Catgeory', 'Rankings']
+
+    def tk(tl: List[int]) -> str:
+        tstr = [f"{query.find_lookup_word_by_id(t)}({t})" for t in tl]
+
+        return f"[{','.join(tstr)}]"
+
+    def fmt_ranking(f: Any) -> str:
+        if not f:
+            return ''
+        ranks = ','.join((f"{tk(r.tokens)}^{r.penalty:.3g}" for r in f.rankings))
+        if len(ranks) > 100:
+            ranks = ranks[:100] + '...'
+        return f"{f.column}({ranks},def={f.default:.3g})"
+
+    def fmt_lookup(lk: Any) -> str:
+        if not lk:
+            return ''
+
+        return f"{lk.lookup_type.__name__}({lk.column}{tk(lk.tokens)})"
+
+    def fmt_cstr(c: Any) -> str:
+        if not c:
+            return ''
+
+        return f'{c[0]}^{c[1]}'
+
+    for search in searches[start:]:
+        fields = ('lookups', 'rankings', 'countries', 'housenumbers',
+                  'postcodes', 'qualifiers')
+        if hasattr(search, 'search'):
+            iters = itertools.zip_longest([f"{search.penalty:.3g}"],
+                                          *(getattr(search.search, attr, []) for attr in fields),
+                                          getattr(search, 'categories', []),
+                                          fillvalue='')
+        else:
+            iters = itertools.zip_longest([f"{search.penalty:.3g}"],
+                                          *(getattr(search, attr, []) for attr in fields),
+                                          [],
+                                          fillvalue='')
+        for penalty, lookup, rank, cc, hnr, pc, qual, cat in iters:
+            yield [penalty, fmt_lookup(lookup), fmt_cstr(hnr),
+                   fmt_cstr(pc), fmt_cstr(cc), fmt_cstr(qual), fmt_cstr(cat), fmt_ranking(rank)]
+        yield None

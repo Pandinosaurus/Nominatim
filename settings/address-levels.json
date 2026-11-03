@@ -21,10 +21,10 @@
           "croft" : 20,
           "subdivision" : 22,
           "allotments" : 22,
-          "neighbourhood" : [20, 22],
+          "neighbourhood" : 24,
           "quarter" : [20, 22],
-          "isolated_dwelling" : [22, 20],
-          "farm" : [22, 20],
+          "isolated_dwelling" : [22, 25],
+          "farm" : [22, 25],
           "city_block" : 25,
           "mountain_pass" : 25,
           "square" : 25,
@@ -48,17 +48,20 @@
           "" : [25, 0]
       },
       "landuse" : {
-          "residential" : 22,
-          "farm" : 22,
-          "farmyard" : 22,
-          "industrial" : 22,
-          "commercial" : 22,
-          "allotments" : 22,
-          "retail" : 22,
-          "" : [22, 0]
+          "residential" : 24,
+          "farm" : 24,
+          "farmyard" : 24,
+          "industrial" : 24,
+          "commercial" : 24,
+          "allotments" : 24,
+          "retail" : 24,
+          "" : [24, 0]
       },
       "leisure" : {
-          "park" : [24, 0]
+          "park" : [24, 0],
+          "nature_reserve" : [24, 0],
+          "garden": [25, 0],
+          "common": [25, 0]
       },
       "natural" : {
           "peak" : [18, 0],
@@ -74,6 +77,14 @@
           "stone" : 30,
           "" : [22, 0]
       },
+      "water" : {
+          "lake" : [20, 0],
+          "reservoir" : [20, 0],
+          "wastewater" : [24, 0],
+          "pond" : [24, 0],
+          "fountain" : [24, 0],
+          "" : [22, 0]
+      },
       "waterway" : {
           "river" : [19, 0],
           "stream" : [22, 0],
@@ -82,7 +93,7 @@
           "" : [20, 0]
       },
       "highway" : {
-          "" : 26,
+          "" : 30,
           "service" : 27,
           "cycleway" : 27,
           "path" : 27,
@@ -93,13 +104,51 @@
           "primary_link" : 27,
           "trunk_link" : 27,
           "secondary_link" : 27,
-          "tertiary_link" : 27
+          "tertiary_link" : 27,
+          "residential" : 26,
+          "track" : 26,
+          "unclassified" : 26,
+          "tertiary" : 26,
+          "secondary" : 26,
+          "primary" : 26,
+          "living_street" : 26,
+          "trunk" : 26,
+          "motorway" : 26,
+          "pedestrian" : 26,
+          "road" : 26,
+          "construction" : 26
       },
       "mountain_pass" : {
           "" : [20, 0]
       },
       "historic" : {
           "neighbourhood" : [22, 0]
+      }
+  }
+},
+{ "countries" : [ "au" ],
+  "tags" : {
+      "boundary" : {
+          "administrative6": [12, 0]
+      }
+  }
+},
+{ "countries" : [ "ca" ],
+  "tags" : {
+      "place" : {
+          "county" : [12, 0]
+      }
+  }
+},
+{ "countries": [ "cz" ],
+  "tags" : {
+      "boundary" : {
+          "administrative5": 12,
+          "administrative6": [13, 0],
+          "administrative7": [14, 0],
+          "administrative8": 14,
+          "administrative9": 15,
+          "administrative10": 16
       }
   }
 },
@@ -125,6 +174,15 @@
           "administrative8" : 14,
           "administrative9" : 16,
           "administrative10" : 18
+      }
+  }
+},
+{ "countries" : [ "br" ],
+  "tags" : {
+      "boundary" : {
+          "administrative5" : [10, 0],
+          "administrative6" : [12, 0],
+          "administrative7" : [14, 0]
       }
   }
 },
@@ -174,6 +232,40 @@
           "administrative10" : 16
       }
   }
+},
+{ "countries" : ["es"],
+  "tags" : {
+      "place" : {
+          "province" : 10,
+          "civil_parish" : 18
+      },
+      "boundary" : {
+          "administrative5" : [10, 0],
+          "administrative6" : 10,
+          "administrative7" : 12,
+          "administrative10" : 22
+      }
+  }
+},
+{ "countries" : ["sa"],
+  "tags" : {
+      "place" : {
+          "province" : 12,
+          "municipality" : 18
+      }
+  }
+},
+{ "countries" : ["jp"],
+  "tags" : {
+      "boundary" : {
+          "administrative7" : 16,
+          "administrative8" : 18,
+          "administrative9" : 20,
+          "administrative10" : 22,
+          "administrative11" : 24
+      }
+  }
 }
+
 ]
 

@@ -1,0 +1,45 @@
+- step: delete-names
+  type: name
+  filter-name:
+    - '.*https?:.*'
+- step: delete-names
+  type: address
+  filter-name:
+    - '.*=.*'
+    - '.*https?:.*'
+- step: delete-names
+  type: address
+  filter-kind:
+    - unit
+    - floor
+    - flats
+    - country
+    - full
+    - inclusion
+    - '_.*'
+- step: clean-housenumbers
+  filter-kind:
+    - housenumber
+    - conscriptionnumber
+    - streetnumber
+  convert-to-name:
+    - '.*[^;,]{15,}.*'
+    - '(\A|.*,)[^\d,]{3,}(,.*|\Z)'
+- step: clean-postcodes
+  convert-to-address: yes
+  default-pattern: "[A-Z0-9- ]{3,12}"
+- step: clean-tiger-tags
+- step: clean-multilingual-names
+  delimiters: ['/', '-', ' ']
+  filter-kind: ['name']
+- step: split-name-list
+  delimiters: ;
+- step: affix-expansion
+  mode: add-expanded
+- step: delete-names
+  filter-kind: ref
+  filter-name:
+    - ".*,.*"
+    - ".{41,}"
+- step: strip-brace-terms
+- step: tag-japanese
